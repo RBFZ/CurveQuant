@@ -68,7 +68,3 @@ Development notes
   npm run build
   npm run preview
 
-License
-- MIT (You may modify as needed)
-
-If you want additional features (e.g., save/load sessions, color-based curve separation, improved edge detection with OpenCV), tell me which to prioritize and I will add them next.
