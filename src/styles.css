@@ -1,0 +1,154 @@
+:root{
+  --bg:#f4f6f8;
+  --panel:#ffffff;
+  --muted:#666;
+  --accent:#0b5fff;
+}
+
+html,body,#root{
+  height:100%;
+  margin:0;
+  font-family: Inter, Roboto, Arial, sans-serif;
+  background:var(--bg);
+  color:#111;
+}
+
+.app{
+  display:flex;
+  gap:12px;
+  padding:12px;
+  box-sizing:border-box;
+  height:100vh;
+}
+
+/* left (canvas) */
+.left{
+  flex:1 1 auto;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+
+.toolbar{
+  display:flex;
+  gap:12px;
+  align-items:center;
+  flex-wrap:wrap;
+  background:var(--panel);
+  padding:10px;
+  border-radius:6px;
+  box-shadow: 0 1px 4px rgba(16,24,40,0.06);
+}
+
+.cal-buttons button, .toolbar button{
+  margin-right:6px;
+}
+
+.cal-inputs {
+  display:flex;
+  gap:12px;
+  align-items:center;
+}
+
+.detection-controls {
+  display:flex;
+  gap:8px;
+  align-items:center;
+}
+
+/* stage wrapper to handle scroll wheel zoom; keeps stage centered */
+.stage-wrap{
+  background: #fff;
+  border-radius:6px;
+  overflow:hidden;
+  box-shadow: 0 2px 8px rgba(16,24,40,0.06);
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  flex:1 1 auto;
+}
+
+/* right panel */
+.right{
+  width:320px;
+  flex:0 0 320px;
+  display:flex;
+  flex-direction:column;
+}
+
+.panel{
+  background:var(--panel);
+  padding:12px;
+  border-radius:6px;
+  box-shadow: 0 1px 4px rgba(16,24,40,0.06);
+  height:100%;
+  overflow:auto;
+}
+
+.panel h3{
+  margin:8px 0;
+  font-size:14px;
+  color:var(--muted);
+}
+
+.table-preview{
+  max-height:200px;
+  overflow:auto;
+  border:1px solid #eee;
+  margin-top:8px;
+  background:#fafafa;
+  padding:6px;
+  border-radius:4px;
+}
+
+.table-preview table{
+  border-collapse:collapse;
+  width:100%;
+  font-size:13px;
+}
+
+.table-preview th, .table-preview td{
+  border:1px solid #eee;
+  padding:6px;
+  text-align:left;
+}
+
+.probe-row{
+  border:1px dashed transparent;
+  padding:6px;
+  margin:6px 0;
+  border-radius:4px;
+  cursor:pointer;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+
+.probe-row.active{
+  border-color:#ddd;
+  background: linear-gradient(90deg, rgba(11,95,255,0.03), transparent);
+}
+
+button{
+  background:#0b5fff;
+  color:white;
+  border:none;
+  padding:6px 10px;
+  border-radius:4px;
+  cursor:pointer;
+}
+button:disabled{opacity:0.5;cursor:default}
+
+input[type="number"], input[type="text"], textarea, select{
+  padding:6px;
+  border:1px solid #ddd;
+  border-radius:4px;
+  font-size:13px;
+}
+
+/* small helpers */
+small{ color:var(--muted); }
+
+.notes { font-size:12px; color:#444; }
+
+/* Konva overlay text styling fallback (Konva's Text uses canvas) */
