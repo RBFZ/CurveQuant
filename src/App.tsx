@@ -14,8 +14,11 @@ type Probe = {
   id: string;
   xData: number; // in data coordinates (time/sec)
   pixelX: number; // px on image (keeps synced)
-  automaticY: number | null; // array of y-values for each curve (filled by detection)
+  automaticY: number[] | null; // array of y-values for each curve (filled by detection)
   manual: { label: string; yData: number }[]; // manual overrides
+  // per-probe detection overrides (optional)
+  sensitivity?: number | null;
+  bandPx?: number | null;
 };
 
 function uid(prefix = "") {
@@ -27,6 +30,7 @@ export default function App() {
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [img] = useImage(imageSrc || "");
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const imageObjectURLRef = useRef<string | null>(null);
 
   // Konva stage refs and transforms
   const stageRef = useRef<any>(null);
@@ -44,16 +48,48 @@ export default function App() {
   // Probes and curve labels
   const [probes, setProbes] = useState<Probe[]>([]);
   const [labels, setLabels] = useState<string[]>(["5", "10", "20"]);
+  const [labelsText, setLabelsText] = useState<string>(labels.join(","));
+
+  // derived sorted probes for UI and CSV (lowest time first)
+  const sortedProbes = [...probes].sort((a, b) => a.xData - b.xData);
 
   // Detection settings
   const [sensitivity, setSensitivity] = useState(0.6); // 0..1
   const [bandPx, setBandPx] = useState(6); // +/- px to search around probe
   const [detectionResults, setDetectionResults] = useState<Record<string, number[]>>({});
 
+  // Generator state for bulk probe creation
+  const [genStart, setGenStart] = useState<number>(x1.value ?? 0);
+  const [genEnd, setGenEnd] = useState<number>(x2.value ?? 30);
+  const [genInterval, setGenInterval] = useState<number>(1);
+  const [genAutoDetect, setGenAutoDetect] = useState<boolean>(true);
+
+
   // Manual mode
   const [manualMode, setManualMode] = useState(false);
   const [activeProbeId, setActiveProbeId] = useState<string | null>(null);
   const [activeLabel, setActiveLabel] = useState<string | null>(labels[0] || null);
+  const [lockImage, setLockImage] = useState(false);
+
+  // selected-probe temporary settings (only band remains; sensitivity is controlled by the top slider + dropdown)
+  const [selProbeBand, setSelProbeBand] = useState<number | null>(null);
+
+  // UI state
+  const [probesCollapsed, setProbesCollapsed] = useState<boolean>(false);
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    try { return localStorage.getItem("theme") === "dark"; } catch { return false; }
+  });
+  const [sensitivityTarget, setSensitivityTarget] = useState<string>("global"); // "global" or probe.id
+
+  // keep selProbe state synced when user selects a probe
+  useEffect(() => {
+    if (!activeProbeId) {
+      setSelProbeBand(null);
+      return;
+    }
+    const p = probes.find((x) => x.id === activeProbeId);
+    setSelProbeBand(p?.bandPx ?? null);
+  }, [activeProbeId, probes]);
 
   // Hidden canvas for pixel sampling
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -76,6 +112,15 @@ export default function App() {
     hiddenCanvasRef.current = c;
   }, []);
 
+  useEffect(() => {
+    // apply theme class and persist preference
+    try {
+      if (darkMode) document.documentElement.classList.add("dark");
+      else document.documentElement.classList.remove("dark");
+      localStorage.setItem("theme", darkMode ? "dark" : "light");
+    } catch {}
+  }, [darkMode]);
+
   // Helpers for calibration existence
   const calibrated = () =>
     x1.pixel && x2.pixel && y1.pixel && y2.pixel && x1.value !== null && x2.value !== null && y1.value !== null && y2.value !== null;
@@ -84,7 +129,17 @@ export default function App() {
   function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
+    try {
+      // revoke previous object URL if present so new images load correctly
+      if (imageObjectURLRef.current) {
+        try { URL.revokeObjectURL(imageObjectURLRef.current); } catch {}
+        imageObjectURLRef.current = null;
+      }
+    } catch {}
     const url = URL.createObjectURL(f);
+    imageObjectURLRef.current = url;
+    // clear any cached img ref so the Konva image hook picks up the new object URL
+    imgRef.current = null;
     setImageSrc(url);
   }
 
@@ -133,12 +188,18 @@ export default function App() {
       if (!probe) return;
       const lockedPixel = { x: probe.pixelX, y: pixel.y };
       const yDataPicked = pixelToData(lockedPixel, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value }).y;
-      // set manual override
+      // set manual override and remove corresponding automatic dot for this label index (so manual hides auto)
+      const sortedLabels = [...labels].sort((a, b) => parseFloat(a) - parseFloat(b));
+      const idx = sortedLabels.indexOf(activeLabel);
       const updated = probes.map((p) => {
         if (p.id !== activeProbeId) return p;
         const newManual = p.manual.filter((m) => m.label !== activeLabel);
         newManual.push({ label: activeLabel, yData: yDataPicked });
-        return { ...p, manual: newManual };
+        let newAuto = p.automaticY ? p.automaticY.slice() : null;
+        if (newAuto && idx >= 0) {
+          newAuto[idx] = undefined as unknown as number;
+        }
+        return { ...p, manual: newManual, automaticY: newAuto };
       });
       setProbes(updated);
     }
@@ -174,30 +235,37 @@ export default function App() {
     const px = Math.round(probe.pixelX);
     const w = canvas.width;
     const h = canvas.height;
-    const band = bandPx;
-    // sample across horizontal ±band and average to create a vertical brightness profile
-    const profile: number[] = new Array(h).fill(0);
+    // per-probe or global band (px)
+    const band = Math.max(0, Math.round(probe.bandPx ?? bandPx));
+    // determine vertical sampling range between calibrated y1 and y2
+    const startY = Math.max(0, Math.floor(Math.min(y1.pixel!.y, y2.pixel!.y)));
+    const endY = Math.min(h - 1, Math.ceil(Math.max(y1.pixel!.y, y2.pixel!.y)));
+    const segH = Math.max(0, endY - startY + 1);
+    if (segH <= 0) return;
+    // sample across horizontal ±band and average to create a vertical brightness profile only within [startY,endY]
+    const profile: number[] = new Array(segH).fill(0);
     for (let dy = -band; dy <= band; dy++) {
       const sx = px + dy;
       if (sx < 0 || sx >= w) continue;
-      const data = ctx.getImageData(sx, 0, 1, h).data;
-      for (let y = 0; y < h; y++) {
+      const data = ctx.getImageData(sx, startY, 1, segH).data;
+      for (let y = 0; y < segH; y++) {
         const r = data[y * 4], g = data[y * 4 + 1], b = data[y * 4 + 2];
-        // brightness (0..255)
         profile[y] += 0.299 * r + 0.587 * g + 0.114 * b;
       }
     }
     // normalize
     const n = band * 2 + 1;
-    for (let y = 0; y < h; y++) profile[y] /= n;
+    for (let y = 0; y < segH; y++) profile[y] /= n;
 
     // compute derivative and find peaks where brightness changes strongly (edges)
-    const diff: number[] = new Array(h - 1);
-    for (let y = 0; y < h - 1; y++) diff[y] = Math.abs(profile[y + 1] - profile[y]);
+    const diff: number[] = new Array(Math.max(0, profile.length - 1));
+    for (let y = 0; y < diff.length; y++) diff[y] = Math.abs(profile[y + 1] - profile[y]);
 
     // simple peak picking: find local maxima above threshold
-    const maxDiff = Math.max(...diff);
-    const threshold = maxDiff * (0.15 + 0.7 * (1 - sensitivity)); // invert sens to make slider intuitive
+    const maxDiff = diff.length ? Math.max(...diff) : 0;
+    // per-probe or global sensitivity
+    const localSensitivity = probe.sensitivity ?? sensitivity;
+    const threshold = maxDiff * (0.15 + 0.7 * (1 - localSensitivity)); // invert sens to make slider intuitive
     const peaks: number[] = [];
     for (let y = 1; y < diff.length - 1; y++) {
       if (diff[y] > diff[y - 1] && diff[y] > diff[y + 1] && diff[y] >= threshold) {
@@ -210,7 +278,7 @@ export default function App() {
       let best = py;
       const r = 6;
       let minB = Infinity;
-      for (let yy = Math.max(0, py - r); yy <= Math.min(h - 1, py + r); yy++) {
+      for (let yy = Math.max(0, py - r); yy <= Math.min(profile.length - 1, py + r); yy++) {
         if (profile[yy] < minB) {
           minB = profile[yy];
           best = yy;
@@ -221,20 +289,42 @@ export default function App() {
 
     // We expect number of labels curves: sort candidates top->bottom and take up to labels.length
     candidates.sort((a, b) => a - b); // top (small y) first
-    const chosen = candidates.slice(0, labels.length);
-    // map to data coordinates
-    const ysData = chosen.map((py) =>
-      pixelToData({ x: px, y: py }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y
-    );
+    const chosenSeg = candidates.slice(0, labels.length);
+    // map to pixel coordinates within original image, then to data coordinates
+    const ysData = chosenSeg.map((segY) => {
+      const py = startY + segY;
+      return pixelToData({ x: px, y: py }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
+    });
     // store
     setDetectionResults((s) => ({ ...s, [probe.id]: ysData }));
     // update probe automaticY
     setProbes((ps) => ps.map((p) => (p.id === probe.id ? { ...p, automaticY: ysData } : p)));
   }
 
+  // clear everything (full reset)
+  function clearAll() {
+    setImageSrc(null);
+    setProbes([]);
+    setDetectionResults({});
+    setX1({ pixel: null, value: 0 });
+    setX2({ pixel: null, value: 30 });
+    setY1({ pixel: null, value: 0 });
+    setY2({ pixel: null, value: 50 });
+    setLabels(["5", "10", "20"]);
+    setLabelsText("5,10,20");
+    setActiveProbeId(null);
+    setManualMode(false);
+    setLockImage(false);
+  }
+
   // run detection for all probes
   function runAllDetections() {
-    probes.forEach((p) => runDetectionForProbe(p));
+    // clear manual overrides so Detect All fully replaces points (per your request)
+    setProbes((ps) => {
+      const cleared = ps.map((p) => ({ ...p, manual: [] }));
+      cleared.forEach((p) => runDetectionForProbe(p));
+      return cleared;
+    });
   }
 
   // when calibration or image changes, re-run detection
@@ -255,11 +345,11 @@ export default function App() {
 
   // Export CSV
   function downloadCSV() {
-    const rows = [];
+    const rows: (string | number)[][] = [];
     const header = ["Time/sec (X)", ...labels.sort((a, b) => parseFloat(a) - parseFloat(b)).map(String)];
     rows.push(header);
     // each probe is a row
-    for (const p of probes) {
+    for (const p of sortedProbes) {
       const row: (string | number)[] = [];
       row.push(p.xData);
       for (const label of header.slice(1)) {
@@ -320,7 +410,15 @@ export default function App() {
           <div>
             <label>Load Image:</label>
             <input type="file" accept="image/*" onChange={onFile} />
-            <button onClick={() => { setImageSrc(null); setProbes([]); }}>Clear</button>
+            <label style={{ marginLeft: 8 }}>
+              <input type="checkbox" checked={lockImage} onChange={(e) => setLockImage(e.target.checked)} /> Lock image
+            </label>
+            <button onClick={() => clearAll()} style={{ marginLeft: 8 }}>
+              Clear
+            </button>
+            <button onClick={() => setDarkMode((d) => !d)} style={{ marginLeft: 8 }}>
+              {darkMode ? "Light" : "Dark"}
+            </button>
           </div>
           <div className="cal-buttons">
             <div>
@@ -351,9 +449,41 @@ export default function App() {
           </div>
           <div className="detection-controls">
             <label>Sensitivity</label>
-            <input type="range" min={0} max={1} step={0.01} value={sensitivity} onChange={(e) => setSensitivity(Number(e.target.value))} />
-            <label>Band px</label>
-            <input type="number" min={0} max={40} value={bandPx} onChange={(e) => setBandPx(Number(e.target.value))} />
+            <select value={sensitivityTarget} onChange={(e) => setSensitivityTarget(e.target.value)}>
+              <option value="global">Global</option>
+              {probes.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.id} ({p.xData.toFixed(3)}s)
+                </option>
+              ))}
+            </select>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={
+                sensitivityTarget === "global"
+                  ? sensitivity
+                  : (probes.find((p) => p.id === sensitivityTarget)?.sensitivity ?? sensitivity)
+              }
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (sensitivityTarget === "global") {
+                  setSensitivity(v);
+                  // re-run all detections with new global sensitivity
+                  setTimeout(() => runAllDetections(), 50);
+                } else {
+                  const id = sensitivityTarget;
+                  setProbes((ps) => {
+                    const updated = ps.map((p) => (p.id === id ? { ...p, sensitivity: v } : p));
+                    const p = updated.find((pp) => pp.id === id);
+                    if (p) setTimeout(() => runDetectionForProbe(p), 50);
+                    return updated;
+                  });
+                }
+              }}
+            />
             <button onClick={() => runAllDetections()}>Detect All</button>
           </div>
         </div>
@@ -369,14 +499,14 @@ export default function App() {
             setScale(newScale);
           }}
         >
-          <Stage
+            <Stage
             width={stageSize.width}
             height={stageSize.height}
             scaleX={scale}
             scaleY={scale}
             x={stagePos.x}
             y={stagePos.y}
-            draggable
+            draggable={!lockImage}
             onDragEnd={(e) => setStagePos({ x: e.target.x(), y: e.target.y() })}
             ref={stageRef}
             onClick={onStageClick}
@@ -402,23 +532,41 @@ export default function App() {
               {/* probes: vertical lines */}
               {probes.map((p, i) => (
                 <React.Fragment key={p.id}>
-                  <Line
-                    points={[p.pixelX, 0, p.pixelX, imgRef.current ? imgRef.current.naturalHeight : stageSize.height]}
-                    stroke="black"
-                    strokeWidth={2}
-                    dash={[4, 4]}
-                    draggable
-                    dragBoundFunc={(pos) => ({ x: pos.x, y: 0 })}
-                    onDragMove={(e) => onDragProbe(e, p.id)}
-                    onDragEnd={() => onDragEndProbe(p.id)}
-                  />
+                  {(() => {
+                    // compute bottom Y where the vertical probe line should stop.
+                    // Cut off at the data y = 0 (x-axis) if calibration exists; otherwise use image bottom.
+                    const yBottom = calibrated()
+                      ? dataToPixel(
+                          { x: x1.value ?? x2.value ?? 0, y: 0 },
+                          { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! },
+                          { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }
+                        ).y
+                      : imgRef.current
+                      ? imgRef.current.naturalHeight
+                      : stageSize.height;
+                    return (
+                      <Line
+                        points={[p.pixelX, 0, p.pixelX, yBottom]}
+                        stroke="black"
+                        strokeWidth={2}
+                        dash={[4, 4]}
+                        draggable
+                        dragBoundFunc={(pos) => ({ x: pos.x, y: 0 })}
+                        onDragMove={(e) => onDragProbe(e, p.id)}
+                        onDragEnd={() => onDragEndProbe(p.id)}
+                      />
+                    );
+                  })()}
                   <Circle x={p.pixelX} y={20} radius={8} fill="#222" />
                   <Text x={p.pixelX + 10} y={8} text={`${p.xData.toFixed(2)} s`} fontSize={14} fill="black" />
                   {/* automatic points */}
                   {p.automaticY &&
                     p.automaticY.map((yval, idx) => {
+                      if (yval === undefined || yval === null) return null;
                       const sortedLabels = [...labels].sort((a, b) => parseFloat(a) - parseFloat(b));
                       const label = sortedLabels[idx];
+                      // if there's a manual override for this label, skip rendering automatic point
+                      if (p.manual.find((m) => m.label === label)) return null;
                       const px = p.pixelX;
                       const py = dataToPixel({ x: p.xData, y: yval }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
                       return (
@@ -452,17 +600,51 @@ export default function App() {
           <h3>Labels (top → bottom: least → greatest)</h3>
           <div>
             <textarea
-              value={labels.join(",")}
-              onChange={(e) => setLabels(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
+              value={labelsText}
+              onChange={(e) => setLabelsText(e.target.value)}
+              onBlur={() => {
+                const parsed = labelsText.split(",").map((s) => s.trim()).filter(Boolean);
+                setLabels(parsed);
+                if (parsed.length > 0 && (activeLabel === null || !parsed.includes(activeLabel))) {
+                  setActiveLabel(parsed[0]);
+                }
+              }}
               rows={2}
               style={{ width: "100%" }}
             />
-            <small>Comma-separated numeric labels, e.g. 5,10,20</small>
+            <div style={{ marginTop: 6 }}>
+              <button onClick={() => {
+                const parsed = labelsText.split(",").map((s) => s.trim()).filter(Boolean);
+                setLabels(parsed);
+                if (parsed.length > 0 && (activeLabel === null || !parsed.includes(activeLabel))) {
+                  setActiveLabel(parsed[0]);
+                }
+              }}>Apply labels</button>
+            </div>
+            <small>Comma-separated numeric labels, e.g. 5,10,20 (edit, then blur or press Apply)</small>
           </div>
 
           <h3>Probes</h3>
           <div>
-            <button onClick={() => addProbeAtData(null)}>Add probe (center)</button>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <button onClick={() => addProbeAtData(null)}>Add probe (center)</button>
+              <select
+                value={activeProbeId ?? ""}
+                onChange={(e) => {
+                  const id = e.target.value || null;
+                  setActiveProbeId(id);
+                }}
+                style={{ minWidth: 160 }}
+              >
+                <option value="">-- select probe --</option>
+                {sortedProbes.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.id} ({p.xData.toFixed(3)}s)
+                  </option>
+                ))}
+              </select>
+              <button onClick={() => setProbesCollapsed(pc => !pc)}>{probesCollapsed ? "Expand" : "Collapse"}</button>
+            </div>
             <div style={{ marginTop: 8 }}>
               <label>Set probe at X (sec):</label>
               <input
@@ -476,20 +658,141 @@ export default function App() {
                 placeholder="type x then Enter"
               />
             </div>
-            <div style={{ marginTop: 8 }}>
+            {!probesCollapsed && (
+              <div style={{ marginTop: 8 }}>
+                {sortedProbes.map((p) => (
+                  <div
+                    key={p.id}
+                    className={"probe-row" + (p.id === activeProbeId ? " active" : "")}
+                    onClick={() => setActiveProbeId(p.id)}
+                  >
+                    <strong>{p.id}</strong>
+                    <div>Time: {p.xData}</div>
+                    <div>Auto: {p.automaticY ? p.automaticY.map((v) => v.toFixed(2)).join(", ") : "—"}</div>
+                    <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData.toFixed(2)}`).join(", ") || "—"}</div>
+                    <button onClick={(ev) => { ev.stopPropagation(); setProbes(ps => ps.filter(q => q.id !== p.id)); }}>Remove</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <h3>Probe Detection Settings</h3>
+          <div style={{ marginBottom: 10 }}>
+            <label>Selected probe:</label>
+            <select
+              value={activeProbeId ?? ""}
+              onChange={(e) => {
+                const id = e.target.value || null;
+                setActiveProbeId(id);
+              }}
+            >
+              <option value="">--select--</option>
               {probes.map((p) => (
-                <div
-                  key={p.id}
-                  className={"probe-row" + (p.id === activeProbeId ? " active" : "")}
-                  onClick={() => setActiveProbeId(p.id)}
-                >
-                  <strong>{p.id}</strong>
-                  <div>Time: {p.xData}</div>
-                  <div>Auto: {p.automaticY ? p.automaticY.map((v) => v.toFixed(2)).join(", ") : "—"}</div>
-                  <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData.toFixed(2)}`).join(", ") || "—"}</div>
-                  <button onClick={() => { setProbes(ps => ps.filter(q => q.id !== p.id)); }}>Remove</button>
-                </div>
+                <option key={p.id} value={p.id}>
+                  {p.id} ({p.xData})
+                </option>
               ))}
+            </select>
+
+            <div style={{ marginTop: 8 }}>
+              <label>Probe Sensitivity</label>
+              <div>
+                <small>Use the Sensitivity slider above and choose a probe from the dropdown to change a probe's sensitivity.</small>
+              </div>
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <label>Probe Band px</label>
+              <input
+                type="number"
+                min={0}
+                max={200}
+                value={selProbeBand ?? bandPx}
+                onChange={(e) => setSelProbeBand(Number(e.target.value))}
+              />
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <button
+                onClick={() => {
+                  if (!activeProbeId) return;
+                  setProbes((ps) => {
+                    const updated = ps.map((p) => (p.id === activeProbeId ? { ...p, bandPx: selProbeBand ?? null } : p));
+                    const p = updated.find((q) => q.id === activeProbeId);
+                    if (p) setTimeout(() => runDetectionForProbe(p), 50);
+                    return updated;
+                  });
+                }}
+              >
+                Apply to probe
+              </button>
+              <button
+                style={{ marginLeft: 8 }}
+                onClick={() => {
+                  const s = (activeProbeId ? probes.find(p => p.id === activeProbeId)?.sensitivity : null) ?? sensitivity;
+                  const b = selProbeBand ?? bandPx;
+                  setProbes((ps) => ps.map((p) => ({ ...p, sensitivity: s, bandPx: b })));
+                }}
+              >
+                Copy settings to all
+              </button>
+            </div>
+          </div>
+
+          <h3>Generate probes at interval</h3>
+          <div style={{ marginBottom: 10 }}>
+            <div>
+              <label>Start (s):</label>
+              <input type="number" value={genStart} onChange={(e) => setGenStart(Number(e.target.value))} />
+              <label style={{ marginLeft: 8 }}>End (s):</label>
+              <input type="number" value={genEnd} onChange={(e) => setGenEnd(Number(e.target.value))} />
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <label>Interval (s):</label>
+              <input type="number" step={0.1} value={genInterval} onChange={(e) => setGenInterval(Number(e.target.value))} />
+              <label style={{ marginLeft: 8 }}>
+                <input type="checkbox" checked={genAutoDetect} onChange={(e) => setGenAutoDetect(e.target.checked)} /> Auto-detect after generate
+              </label>
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <button
+                onClick={() => {
+                  if (!calibrated()) {
+                    alert("Please calibrate axes first.");
+                    return;
+                  }
+                  const start = genStart;
+                  const end = genEnd;
+                  const iv = genInterval;
+                  if (!(iv > 0)) return;
+                  const times: number[] = [];
+                  for (let t = start; t <= end + 1e-9; t = Math.round((t + iv) * 100000) / 100000) {
+                    times.push(Number(t.toFixed(6)));
+                  }
+                  const newProbes: Probe[] = times.map((t) => {
+                    const px = dataToPixel({ x: t, y: 0 }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).x;
+                    return { id: uid("probe_"), xData: t, pixelX: px, automaticY: null, manual: [], sensitivity: null, bandPx: null };
+                  });
+                  // merge skipping near-duplicates (within 1e-6 s)
+                  setProbes((ps) => {
+                    const existingTimes = new Set(ps.map((p) => p.xData));
+                    const merged = [...ps];
+                    for (const np of newProbes) {
+                      if (![...existingTimes].some((et) => Math.abs(et - np.xData) < 1e-6)) {
+                        merged.push(np);
+                      }
+                    }
+                    return merged;
+                  });
+                  if (genAutoDetect) {
+                    // run detection on newly added probes after short delay
+                    setTimeout(() => {
+                      newProbes.forEach((p) => runDetectionForProbe(p));
+                    }, 100);
+                  }
+                }}
+              >
+                Generate probes
+              </button>
             </div>
           </div>
 
@@ -534,7 +837,7 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
-                {probes.map((p) => (
+                {sortedProbes.map((p) => (
                   <tr key={p.id}>
                     <td>{p.xData.toFixed(3)}</td>
                     {[...labels].sort((a, b) => parseFloat(a) - parseFloat(b)).map((lab, idx) => {
