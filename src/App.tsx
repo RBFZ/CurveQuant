@@ -276,15 +276,38 @@ export default function App() {
     const diff: number[] = new Array(Math.max(0, profile.length - 1));
     for (let y = 0; y < diff.length; y++) diff[y] = Math.abs(profile[y + 1] - profile[y]);
 
-    // simple peak picking: find local maxima above threshold
+    // simple peak picking with robust fallback to ensure we return up to labels.length hits
     const maxDiff = diff.length ? Math.max(...diff) : 0;
     // per-probe or global sensitivity
     const localSensitivity = probe.sensitivity ?? sensitivity;
     const threshold = maxDiff * (0.15 + 0.7 * (1 - localSensitivity)); // invert sens to make slider intuitive
+
+    // 1) find local maxima above threshold
     const peaks: number[] = [];
     for (let y = 1; y < diff.length - 1; y++) {
       if (diff[y] > diff[y - 1] && diff[y] > diff[y + 1] && diff[y] >= threshold) {
         peaks.push(y);
+      }
+    }
+
+    // 2) if not enough, include other local maxima regardless of threshold
+    if (peaks.length < labels.length) {
+      for (let y = 1; y < diff.length - 1; y++) {
+        if (diff[y] > diff[y - 1] && diff[y] > diff[y + 1]) {
+          if (!peaks.includes(y)) peaks.push(y);
+        }
+      }
+    }
+
+    // 3) if still not enough, fill using the strongest diff values (avoid very close duplicates)
+    if (peaks.length < labels.length) {
+      const idxs = diff.map((v, i) => i).sort((a, b) => diff[b] - diff[a]);
+      for (const idx of idxs) {
+        if (peaks.length >= labels.length) break;
+        if (idx <= 0 || idx >= diff.length - 1) continue;
+        // avoid adding indices too close to existing peaks
+        if (peaks.some((p) => Math.abs(p - idx) <= 2)) continue;
+        peaks.push(idx);
       }
     }
 
