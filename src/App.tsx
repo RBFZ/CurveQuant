@@ -63,6 +63,8 @@ export default function App() {
   const [genEnd, setGenEnd] = useState<number>(x2.value ?? 30);
   const [genInterval, setGenInterval] = useState<number>(1);
   const [genAutoDetect, setGenAutoDetect] = useState<boolean>(true);
+  // visual-only multiplier for displayed times: 1 or 60
+  const [timeMultiplier, setTimeMultiplier] = useState<number>(1);
 
 
   // Manual mode
@@ -822,14 +824,20 @@ export default function App() {
     setManualTextarea("");
   }
 
-  // convert minutes to seconds (multiplies times by 60, keeps pixelX)
+  // convert minutes to seconds (visual-only toggle: multiplies displayed times in tables)
   function convertMinutesToSeconds() {
-    setX1((s) => ({ ...s, value: s.value !== null && s.value !== undefined ? s.value * 60 : s.value }));
-    setX2((s) => ({ ...s, value: s.value !== null && s.value !== undefined ? s.value * 60 : s.value }));
-    setGenStart((g) => g * 60);
-    setGenEnd((g) => g * 60);
-    setProbes((ps) => ps.map((p) => ({ ...p, xData: p.xData * 60 })));
+    // toggle visual multiplier between 1x and 60x
+    setTimeMultiplier((t) => (t === 1 ? 60 : 1));
   }
+
+  // convert minutes to seconds (multiplies times by 60, keeps pixelX)
+  // function convertMinutesToSeconds() {
+  //   setX1((s) => ({ ...s, value: s.value !== null && s.value !== undefined ? s.value * 60 : s.value }));
+  //   setX2((s) => ({ ...s, value: s.value !== null && s.value !== undefined ? s.value * 60 : s.value }));
+  //   setGenStart((g) => g * 60);
+  //   setGenEnd((g) => g * 60);
+  //   setProbes((ps) => ps.map((p) => ({ ...p, xData: p.xData * 60 })));
+  // }
 
   // Render helpers
   function renderCalibrationMarkers() {
@@ -879,7 +887,7 @@ export default function App() {
               <tbody>
                 {sortedProbes.map((p) => (
                   <tr key={p.id}>
-                    <td>{p.xData.toFixed(3)}</td>
+                    <td>{(p.xData * timeMultiplier).toFixed(3)}</td>
                     {labels.map((lab, idx) => {
                       const m = p.manual.find((mm) => mm.label === lab);
                       if (m) return <td key={lab}>{m.yData.toFixed(3)}</td>;
@@ -1077,7 +1085,7 @@ export default function App() {
               <option value="global">Global</option>
               {probes.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.id} ({p.xData.toFixed(3)}s)
+                  {p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)
                 </option>
               ))}
             </select>
@@ -1124,7 +1132,7 @@ export default function App() {
             }}>
               <option value="global">Global</option>
               {probes.map((p) => (
-                <option key={p.id} value={p.id}>{p.id} ({p.xData.toFixed(3)}s)</option>
+                <option key={p.id} value={p.id}>{p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)</option>
               ))}
             </select>
             <input
@@ -1165,9 +1173,25 @@ export default function App() {
           className="stage-wrap"
           onWheel={(e) => {
             e.preventDefault();
+            // If a probe is selected, use wheel to cycle the activeLabel instead of zooming.
+            if (activeProbeId) {
+              if (!labels || labels.length === 0) return;
+              const dir = e.deltaY > 0 ? 1 : -1; // down -> next, up -> previous
+              const currentIndex = labels.indexOf(activeLabel ?? (labels[0] ?? ""));
+              if (currentIndex === -1) {
+                setActiveLabel(labels[0]);
+              } else {
+                let ni = currentIndex + dir;
+                if (ni < 0) ni = 0;
+                if (ni >= labels.length) ni = labels.length - 1;
+                if (ni !== currentIndex) setActiveLabel(labels[ni]);
+              }
+              return;
+            }
+            // otherwise perform zoom as before
             const old = scale;
-            const dir = e.deltaY > 0 ? -1 : 1;
-            const factor = 1 + dir * 0.08;
+            const dir2 = e.deltaY > 0 ? -1 : 1;
+            const factor = 1 + dir2 * 0.08;
             const newScale = Math.max(0.2, Math.min(5, old * factor));
             setScale(newScale);
           }}
@@ -1223,8 +1247,8 @@ export default function App() {
               {probes.map((p, i) => (
                 <React.Fragment key={p.id}>
                   {(() => {
-                    // compute bottom Y where the vertical probe line should stop.
-                    // Cut off at the data y = 0 (x-axis) if calibration exists; otherwise use image bottom.
+                    // compute top and bottom Y where the vertical probe line should stop.
+                    // bottom aligns with the x-axis (data y=0); top aligns with y2 (or image top fallback).
                     const yBottom = calibrated()
                       ? dataToPixel(
                           { x: x1.value ?? x2.value ?? 0, y: 0 },
@@ -1234,52 +1258,70 @@ export default function App() {
                       : imgRef.current
                       ? imgRef.current.naturalHeight
                       : stageSize.height;
+                    const yTop = calibrated()
+                      ? (y2.pixel ? y2.pixel.y : Math.min(y1.pixel!.y, y2.pixel!.y))
+                      : 0;
                     return (
-                      <Line
-                        points={[p.pixelX, 0, p.pixelX, yBottom]}
-                        stroke="black"
-                        strokeWidth={2}
-                        dash={[4, 4]}
-                        draggable
-                        dragBoundFunc={(pos) => ({ x: pos.x, y: 0 })}
-                        onDragMove={(e) => onDragProbe(e, p.id)}
-                        onDragEnd={() => onDragEndProbe(p.id)}
-                      />
+                      <>
+                        <Line
+                          points={[p.pixelX, yTop, p.pixelX, yBottom]}
+                          stroke={p.id === activeProbeId ? "green" : "black"}
+                          strokeWidth={p.id === activeProbeId ? 3 : 2}
+                          dash={[4, 4]}
+                          draggable
+                          dragBoundFunc={(pos) => ({ x: pos.x, y: yTop })}
+                          onDragMove={(e) => onDragProbe(e, p.id)}
+                          onDragEnd={() => onDragEndProbe(p.id)}
+                        />
+                        {/* top (delete) dot - clicking deletes probe */}
+                        <Circle
+                          x={p.pixelX}
+                          y={yTop}
+                          radius={probeDotSize}
+                          fill="#222"
+                          onClick={(e: any) => {
+                            e.cancelBubble = true;
+                            removeProbe(p.id);
+                          }}
+                        />
+                        {/* bottom selection dot on x-axis - toggles active probe (select/deselect) */}
+                        <Circle
+                          x={p.pixelX}
+                          y={yBottom}
+                          radius={probeDotSize}
+                          fill={p.id === activeProbeId ? "green" : "purple"}
+                          onClick={(e: any) => {
+                            e.cancelBubble = true;
+                            setActiveProbeId(p.id === activeProbeId ? null : p.id);
+                          }}
+                        />
+                        {showProbeText && (
+                          <Text
+                            x={p.pixelX + probeDotSize + 4}
+                            y={Math.max(4, yTop - Math.max(8, Math.round(probeDotSize * 0.6)) - 4)}
+                            text={`${(p.xData * timeMultiplier).toFixed(2)} s`}
+                            fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                            fill="black"
+                          />
+                        )}
+                      </>
                     );
                   })()}
-                  <Circle
-                    x={p.pixelX}
-                    y={20}
-                    radius={probeDotSize}
-                    fill="#222"
-                    onClick={(e: any) => {
-                      // prevent stage click events
-                      e.cancelBubble = true;
-                      removeProbe(p.id);
-                    }}
-                  />
-                  {showProbeText && (
-                    <Text
-                      x={p.pixelX + probeDotSize + 4}
-                      y={8}
-                      text={`${p.xData.toFixed(2)} s`}
-                      fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
-                      fill="black"
-                    />
-                  )}
                   {/* automatic points */}
                   {p.automaticY &&
                     p.automaticY.map((yval, idx) => {
                       if (yval === undefined || yval === null) return null;
-      const sortedLabels = labels.slice();
-                      const label = sortedLabels[idx];
-                      // if there's a manual override for this label, skip rendering automatic point
-                      if (p.manual.find((m) => m.label === label)) return null;
+                      const label = labels[idx];
+                      const hasManual = Boolean(p.manual.find((m) => m.label === label));
+                      // skip automatic if replaced by manual
+                      if (hasManual) return null;
                       const px = p.pixelX;
                       const py = dataToPixel({ x: p.xData, y: yval }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
+                      const isActiveLabel = p.id === activeProbeId && idx === labels.indexOf(activeLabel ?? "");
+                      const color = isActiveLabel ? "red" : "orange";
                       return (
                         <React.Fragment key={p.id + "_auto_" + idx}>
-                          <Circle x={px} y={py} radius={probeDotSize} fill="orange" />
+                          <Circle x={px} y={py} radius={probeDotSize} fill={color} />
                           {showProbeText && (
                             <Text
                               x={px + probeDotSize + 4}
@@ -1297,9 +1339,14 @@ export default function App() {
                   {p.manual.map((m) => {
                     const px = p.pixelX;
                     const py = dataToPixel({ x: p.xData, y: m.yData }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
+                    const isActive = p.id === activeProbeId && m.label === activeLabel;
                     return (
                       <React.Fragment key={p.id + "_man_" + m.label}>
-                        <Circle x={px} y={py} radius={probeDotSize} fill="cyan" />
+                        <Circle x={px} y={py} radius={probeDotSize} fill="blue" />
+                        {isActive && (
+                          // red ring to indicate this manual point is the active label on the active probe
+                          <Circle x={px} y={py} radius={Math.max(1, probeDotSize - 1)} stroke="red" strokeWidth={2} fill="transparent" />
+                        )}
                         {showProbeText && (
                           <Text
                             x={px + probeDotSize + 4}
@@ -1397,7 +1444,7 @@ export default function App() {
                 <option value="">-- select probe --</option>
                 {sortedProbes.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.id} ({p.xData.toFixed(3)}s)
+                    {p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)
                   </option>
                 ))}
               </select>
@@ -1425,7 +1472,7 @@ export default function App() {
                     onClick={() => setActiveProbeId(p.id)}
                   >
                     <strong>{p.id}</strong>
-                    <div>Time: {p.xData}</div>
+                    <div>Time: {(p.xData * timeMultiplier).toFixed(3)}</div>
                     <div>Auto: {p.automaticY ? p.automaticY.map((v) => v.toFixed(2)).join(", ") : "—"}</div>
                     <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData.toFixed(2)}`).join(", ") || "—"}</div>
                     <button onClick={(ev) => { ev.stopPropagation(); setProbes(ps => ps.filter(q => q.id !== p.id)); }}>Remove</button>
@@ -1440,15 +1487,12 @@ export default function App() {
             <label>Selected probe:</label>
             <select
               value={activeProbeId ?? ""}
-              onChange={(e) => {
-                const id = e.target.value || null;
-                setActiveProbeId(id);
-              }}
+              onChange={(e) => setActiveProbeId(e.target.value || null)}
             >
               <option value="">--select--</option>
               {probes.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.id} ({p.xData})
+                  {p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)
                 </option>
               ))}
             </select>
@@ -1565,7 +1609,7 @@ export default function App() {
                 <option value="">--select--</option>
                 {probes.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.id} ({p.xData})
+                    {p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)
                   </option>
                 ))}
               </select>
@@ -1597,7 +1641,7 @@ export default function App() {
               <tbody>
                 {sortedProbes.map((p) => (
                   <tr key={p.id}>
-                    <td>{p.xData.toFixed(3)}</td>
+                    <td>{(p.xData * timeMultiplier).toFixed(3)}</td>
                     {labels.map((lab, idx) => {
                       const m = p.manual.find((mm) => mm.label === lab);
                       if (m) return <td key={lab}>{m.yData.toFixed(3)}</td>;
