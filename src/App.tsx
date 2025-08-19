@@ -96,6 +96,13 @@ export default function App() {
   const startXRef = useRef<number | null>(null);
   const startWidthRef = useRef<number | null>(null);
 
+  // Left panel resizing refs/state
+  const leftWidthRef = useRef<number>(320);
+  const [leftWidth, setLeftWidth] = useState<number>(320);
+  const leftResizingRef = useRef<boolean>(false);
+  const leftStartXRef = useRef<number | null>(null);
+  const leftStartWidthRef = useRef<number | null>(null);
+
   // mask canvas & highlighter state for freehand selection
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   // keep strokes painted directly to the mask canvas so disconnected areas are supported
@@ -112,6 +119,9 @@ export default function App() {
   // probe dot size and whether to show the text label next to the dot
   const [probeDotSize, setProbeDotSize] = useState<number>(8);
   const [showProbeText, setShowProbeText] = useState<boolean>(true);
+
+  // manual-entry textarea state (left panel)
+  const [manualTextarea, setManualTextarea] = useState<string>("");
 
   // mask stats (for visible debug indicator)
   const [maskCount, setMaskCount] = useState<number>(0);
@@ -294,16 +304,19 @@ export default function App() {
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
-    // update stage size to window
+    // update stage size to window and reserved left/right panels
     const update = () => {
-      const w = Math.min(window.innerWidth - 340, 1400);
+      const minCenter = 0;
+      const totalDividers = 16; // two 8px dividers
+      const available = window.innerWidth - leftWidthRef.current - rightWidthRef.current - totalDividers;
+      const w = Math.max(minCenter, Math.min(Math.max(0, available), 1400));
       const h = Math.min(window.innerHeight - 120, 900);
-      setStageSize({ width: w > 400 ? w : 800, height: h > 300 ? h : 600 });
+      setStageSize({ width: w, height: h > 300 ? h : 600 });
     };
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, []);
+  }, [leftWidth, rightWidth]);
 
   useEffect(() => {
     // create hidden canvas
@@ -392,14 +405,13 @@ export default function App() {
       const lockedPixel = { x: probe.pixelX, y: pixel.y };
       const yDataPicked = pixelToData(lockedPixel, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value }).y;
       // set manual override and remove corresponding automatic dot for this label index (so manual hides auto)
-      const sortedLabels = [...labels].sort((a, b) => parseFloat(a) - parseFloat(b));
-      const idx = sortedLabels.indexOf(activeLabel);
+      const idx = labels.indexOf(activeLabel as string);
       const updated = probes.map((p) => {
         if (p.id !== activeProbeId) return p;
         const newManual = p.manual.filter((m) => m.label !== activeLabel);
-        newManual.push({ label: activeLabel, yData: yDataPicked });
+        newManual.push({ label: activeLabel as string, yData: yDataPicked });
         let newAuto = p.automaticY ? p.automaticY.slice() : null;
-        if (newAuto && idx >= 0) {
+        if (newAuto && idx >= 0 && idx < newAuto.length) {
           newAuto[idx] = undefined as unknown as number;
         }
         return { ...p, manual: newManual, automaticY: newAuto };
@@ -733,7 +745,7 @@ export default function App() {
   // Export CSV
   function downloadCSV() {
     const rows: (string | number)[][] = [];
-    const header = ["Time/sec (X)", ...labels.sort((a, b) => parseFloat(a) - parseFloat(b)).map(String)];
+    const header = ["Time/sec (X)", ...labels.map(String)];
     rows.push(header);
     // each probe is a row
     for (const p of sortedProbes) {
@@ -745,10 +757,9 @@ export default function App() {
         if (m) {
           row.push(m.yData);
         } else if (p.automaticY) {
-          // match by index: labels list is sorted; detection results are top->bottom
-          const sortedLabels = [...labels].sort((a, b) => parseFloat(a) - parseFloat(b));
-          const idx = sortedLabels.indexOf(label);
-          if (idx >= 0 && p.automaticY[idx] !== undefined) row.push(Number(p.automaticY[idx].toFixed(3)));
+          // match by index: labels list is typed-order; detection results are top->bottom
+          const idx = labels.indexOf(label);
+          if (idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) row.push(Number(p.automaticY[idx].toFixed(3)));
           else row.push("");
         } else row.push("");
       }
@@ -757,6 +768,67 @@ export default function App() {
     const csv = exportCSV(rows);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     saveAs(blob, "graph-data.csv");
+  }
+
+  // Insert manual data lines from left textarea into probes state
+  function applyManualTextarea() {
+    if (!calibrated()) {
+      alert("Please calibrate axes first.");
+      return;
+    }
+    const lines = manualTextarea.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return;
+    setProbes((ps) => {
+      const updated = [...ps];
+      const sortedLabels = labels.slice();
+      for (const line of lines) {
+        const parts = line.split(",").map(s => s.trim());
+        if (parts.length === 0) continue;
+        const t = Number(parts[0]);
+        if (isNaN(t)) continue;
+        // find existing probe at same time (within epsilon)
+        const EXIST_EPS = 1e-6;
+        let existing = updated.find(p => Math.abs(p.xData - t) < EXIST_EPS);
+        const px = dataToPixel({ x: t, y: 0 }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).x;
+        if (existing) {
+          // update existing manual entries
+          for (let i = 1; i < parts.length; i++) {
+            const vstr = parts[i];
+            if (vstr === "" || vstr === "-" || vstr === "—") continue;
+            const val = Number(vstr);
+            if (isNaN(val)) continue;
+            const lab = sortedLabels[i-1];
+            existing.manual = existing.manual.filter(m => m.label !== lab);
+            existing.manual.push({ label: lab, yData: val });
+            if (existing.automaticY && (i-1) >= 0 && (i-1) < existing.automaticY.length) existing.automaticY[i-1] = undefined as unknown as number;
+          }
+          existing.pixelX = px;
+        } else {
+          const manualArr: { label: string; yData: number }[] = [];
+          for (let i = 1; i < parts.length; i++) {
+            const vstr = parts[i];
+            if (vstr === "" || vstr === "-" || vstr === "—") continue;
+            const val = Number(vstr);
+            if (isNaN(val)) continue;
+            const lab = sortedLabels[i-1];
+            manualArr.push({ label: lab, yData: val });
+          }
+          const newProbe: Probe = { id: uid("probe_"), xData: t, pixelX: px, automaticY: null, manual: manualArr, sensitivity: null, bandPx: null };
+          updated.push(newProbe);
+        }
+      }
+      return updated;
+    });
+    setManualTextarea("");
+  }
+
+  // convert minutes to seconds (multiplies times by 60, keeps pixelX)
+  function convertMinutesToSeconds() {
+    setX1((s) => ({ ...s, value: s.value !== null && s.value !== undefined ? s.value * 60 : s.value }));
+    setX2((s) => ({ ...s, value: s.value !== null && s.value !== undefined ? s.value * 60 : s.value }));
+    setGenStart((g) => g * 60);
+    setGenEnd((g) => g * 60);
+    setProbes((ps) => ps.map((p) => ({ ...p, xData: p.xData * 60 })));
   }
 
   // Render helpers
@@ -791,8 +863,97 @@ export default function App() {
   }
 
   return (
-    <div className="app">
-      <div className="left">
+    <div className="app" style={{ display: "flex" }}>
+      {/* LEFT: Data table + manual-entry textarea */}
+      <div className="left-data" style={{ width: leftWidth, minWidth: 220, maxWidth: 700, overflow: "auto" }}>
+        <div className="panel" style={{ padding: 8 }}>
+          <h3>Data Table</h3>
+          <div className="table-preview">
+            <table style={{ width: "100%" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left" }}>Time (s)</th>
+                  {labels.map((l) => <th key={l}>{l}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedProbes.map((p) => (
+                  <tr key={p.id}>
+                    <td>{p.xData.toFixed(3)}</td>
+                    {labels.map((lab, idx) => {
+                      const m = p.manual.find((mm) => mm.label === lab);
+                      if (m) return <td key={lab}>{m.yData.toFixed(3)}</td>;
+                      if (p.automaticY && idx < p.automaticY.length && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(3)}</td>;
+                      return <td key={lab}> </td>;
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ marginTop: 8 }}>
+            <label>Insert manual data (one line per probe):</label>
+            <div style={{ marginTop: 6 }}>
+              <button onClick={() => convertMinutesToSeconds()}>Convert minutes → seconds</button>
+            </div>
+            <textarea
+              value={manualTextarea}
+              onChange={(e) => setManualTextarea(e.target.value)}
+              placeholder={`one line per probe, format: time,val1,val2,...\nExample: 0,0,0,0`}
+              rows={5}
+              style={{ width: "100%", boxSizing: "border-box", marginTop: 8 }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  applyManualTextarea();
+                }
+              }}
+            />
+            <div style={{ marginTop: 6 }}>
+              <button onClick={() => applyManualTextarea()}>Add</button>
+            </div>
+            <small>Values correspond to labels shown above (top → bottom).</small>
+          </div>
+        </div>
+      </div>
+
+      {/* divider between left-data and main content */}
+      <div
+        className="divider left-divider"
+        onMouseDown={(e) => {
+          // start resizing left panel
+          leftResizingRef.current = true;
+          leftStartXRef.current = e.clientX;
+          leftStartWidthRef.current = leftWidthRef.current;
+            const onMove = (ev: MouseEvent) => {
+            if (!leftResizingRef.current) return;
+            const dx = (leftStartXRef.current === null ? 0 : ev.clientX - leftStartXRef.current);
+            const minCenter = 0;
+            const totalDividers = 16;
+            const maxLeft = Math.max(0, window.innerWidth - minCenter - rightWidthRef.current - totalDividers);
+            const newW = Math.max(0, Math.min(maxLeft, (leftStartWidthRef.current || 320) + dx));
+            leftWidthRef.current = newW;
+            setLeftWidth(newW);
+            // update stage size proactively
+            const available = window.innerWidth - leftWidthRef.current - rightWidthRef.current - totalDividers;
+            setStageSize((s) => ({ ...s, width: Math.max(minCenter, Math.min(Math.max(0, available), 1400)) }));
+          };
+          const onUp = () => {
+            leftResizingRef.current = false;
+            leftStartXRef.current = null;
+            leftStartWidthRef.current = null;
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+          };
+          window.addEventListener("mousemove", onMove);
+          window.addEventListener("mouseup", onUp);
+        }}
+        style={{ width: 8, cursor: "col-resize", background: "transparent" }}
+      />
+
+      {/* CENTER: toolbar + stage (previously 'left') */}
+      <div className="left" style={{ flex: 1 }}>
         <div className="toolbar">
           <div>
             <label>Load Image:</label>
@@ -1110,7 +1271,7 @@ export default function App() {
                   {p.automaticY &&
                     p.automaticY.map((yval, idx) => {
                       if (yval === undefined || yval === null) return null;
-                      const sortedLabels = [...labels].sort((a, b) => parseFloat(a) - parseFloat(b));
+      const sortedLabels = labels.slice();
                       const label = sortedLabels[idx];
                       // if there's a manual override for this label, skip rendering automatic point
                       if (p.manual.find((m) => m.label === label)) return null;
@@ -1138,8 +1299,16 @@ export default function App() {
                     const py = dataToPixel({ x: p.xData, y: m.yData }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
                     return (
                       <React.Fragment key={p.id + "_man_" + m.label}>
-                        <Circle x={px} y={py} radius={6} fill="cyan" />
-                        <Text x={px + 8} y={py - 8} text={`${m.label}: ${m.yData.toFixed(2)}`} fontSize={12} />
+                        <Circle x={px} y={py} radius={probeDotSize} fill="cyan" />
+                        {showProbeText && (
+                          <Text
+                            x={px + probeDotSize + 4}
+                            y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
+                            text={`${m.label}: ${m.yData.toFixed(2)}`}
+                            fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                            fill="black"
+                          />
+                        )}
                       </React.Fragment>
                     );
                   })}
@@ -1158,12 +1327,18 @@ export default function App() {
           startXRef.current = e.clientX;
           startWidthRef.current = rightWidthRef.current;
           // attach move/up handlers
-          const onMove = (ev: MouseEvent) => {
+            const onMove = (ev: MouseEvent) => {
             if (!resizingRef.current) return;
             const dx = (startXRef.current === null ? 0 : ev.clientX - startXRef.current);
-            const newW = Math.max(220, Math.min(window.innerWidth - 300, (startWidthRef.current || 320) - dx));
+            const minCenter = 0;
+            const totalDividers = 16;
+            const maxRight = Math.max(0, window.innerWidth - minCenter - leftWidthRef.current - totalDividers);
+            const newW = Math.max(0, Math.min(maxRight, (startWidthRef.current || 320) - dx));
             rightWidthRef.current = newW;
             setRightWidth(newW);
+            // update stage size proactively
+            const available = window.innerWidth - leftWidthRef.current - rightWidthRef.current - totalDividers;
+            setStageSize((s) => ({ ...s, width: Math.max(minCenter, Math.min(Math.max(0, available), 1400)) }));
           };
           const onUp = () => {
             resizingRef.current = false;
@@ -1416,14 +1591,14 @@ export default function App() {
               <thead>
                 <tr>
                   <th>Time (s)</th>
-                  {[...labels].sort((a, b) => parseFloat(a) - parseFloat(b)).map((l) => <th key={l}>{l}</th>)}
+                  {labels.map((l) => <th key={l}>{l}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {sortedProbes.map((p) => (
                   <tr key={p.id}>
                     <td>{p.xData.toFixed(3)}</td>
-                    {[...labels].sort((a, b) => parseFloat(a) - parseFloat(b)).map((lab, idx) => {
+                    {labels.map((lab, idx) => {
                       const m = p.manual.find((mm) => mm.label === lab);
                       if (m) return <td key={lab}>{m.yData.toFixed(3)}</td>;
                       if (p.automaticY && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(3)}</td>;
