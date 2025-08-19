@@ -98,10 +98,128 @@ export default function App() {
 
   // mask canvas & highlighter state for freehand selection
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // keep strokes painted directly to the mask canvas so disconnected areas are supported
+  const highlightPathsRef = useRef<{ x: number; y: number }[][]>([]);
+  const drawingRef = useRef<boolean>(false);
+  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
   const [highlightEnabled, setHighlightEnabled] = useState<boolean>(false);
-  const [highlightPath, setHighlightPath] = useState<{ x: number; y: number }[]>([]);
   const [highlightSize, setHighlightSize] = useState<number>(10);
   const MIN_VERTICAL_SEPARATION = 3;
+
+  // ensure mask canvas exists and matches image size
+  function ensureMaskCanvas() {
+    if (!imgRef.current) return;
+    let c = maskCanvasRef.current;
+    if (!c) {
+      c = document.createElement("canvas");
+      maskCanvasRef.current = c;
+    }
+    const w = imgRef.current!.naturalWidth;
+    const h = imgRef.current!.naturalHeight;
+    if (c.width !== w || c.height !== h) {
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext("2d");
+      if (ctx) {
+        ctx.clearRect(0, 0, c.width, c.height);
+      }
+      // reset stored strokes (we'll keep mask canvas authoritative)
+      highlightPathsRef.current = [];
+    }
+  }
+
+  function clearHighlight() {
+    highlightPathsRef.current = [];
+    const c = maskCanvasRef.current;
+    if (c) {
+      const ctx = c.getContext("2d");
+      if (ctx) {
+        ctx.clearRect(0, 0, c.width, c.height);
+      }
+    }
+    // force re-draw of Konva layer visually
+    try { layerRef.current?.batchDraw(); } catch {}
+  }
+
+  // paint a single stroke (array of points) to the mask canvas (white opaque)
+  function paintStrokeToMask(stroke: { x: number; y: number }[]) {
+    ensureMaskCanvas();
+    const c = maskCanvasRef.current;
+    if (!c || !stroke.length) return;
+    const ctx = c.getContext("2d")!;
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,1)";
+    ctx.fillStyle = "rgba(255,255,255,1)";
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.lineWidth = Math.max(1, highlightSize) * 2;
+    ctx.beginPath();
+    ctx.moveTo(stroke[0].x, stroke[0].y);
+    for (let i = 1; i < stroke.length; i++) {
+      ctx.lineTo(stroke[i].x, stroke[i].y);
+    }
+    ctx.stroke();
+    // draw end caps to ensure no gaps
+    ctx.beginPath();
+    ctx.arc(stroke[0].x, stroke[0].y, Math.max(1, highlightSize), 0, Math.PI * 2);
+    ctx.fill();
+    const last = stroke[stroke.length - 1];
+    ctx.beginPath();
+    ctx.arc(last.x, last.y, Math.max(1, highlightSize), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    try { layerRef.current?.batchDraw(); } catch {}
+  }
+
+  // pointer handlers for freehand painting (stage coordinates -> image pixel coords)
+  function getPointerImagePos(e: any) {
+    const stage = stageRef.current;
+    if (!stage) return null;
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return null;
+    // convert through transform
+    const transform = stage.getAbsoluteTransform().copy().invert();
+    const pos = transform.point({ x: pointer.x, y: pointer.y });
+    // clamp to image bounds if available
+    if (!imgRef.current) return { x: pos.x, y: pos.y };
+    return { x: Math.max(0, Math.min(imgRef.current.naturalWidth - 1, pos.x)), y: Math.max(0, Math.min(imgRef.current.naturalHeight - 1, pos.y)) };
+  }
+
+  function handlePointerDown(e: any) {
+    if (!highlightEnabled) return;
+    if (!imgRef.current) return;
+    ensureMaskCanvas();
+    drawingRef.current = true;
+    const pos = getPointerImagePos(e);
+    if (!pos) return;
+    lastPointRef.current = pos;
+    highlightPathsRef.current.push([pos]);
+    // paint initial dot immediately
+    paintStrokeToMask([pos]);
+  }
+
+  function handlePointerMove(e: any) {
+    if (!highlightEnabled) return;
+    if (!drawingRef.current) return;
+    const pos = getPointerImagePos(e);
+    if (!pos) return;
+    const curStroke = highlightPathsRef.current[highlightPathsRef.current.length - 1];
+    if (!curStroke) return;
+    curStroke.push(pos);
+    // paint incremental segment to mask to avoid heavy re-painting full stroke each move
+    paintStrokeToMask(curStroke.slice(Math.max(0, curStroke.length - 8)));
+    lastPointRef.current = pos;
+  }
+
+  function handlePointerUp(e: any) {
+    if (!highlightEnabled) return;
+    if (!drawingRef.current) return;
+    drawingRef.current = false;
+    // paint entire stroke to ensure continuity
+    const stroke = highlightPathsRef.current[highlightPathsRef.current.length - 1];
+    if (stroke) paintStrokeToMask(stroke);
+    lastPointRef.current = null;
+  }
 
   // keep selProbe state synced when user selects a probe
   useEffect(() => {
@@ -169,6 +287,8 @@ export default function App() {
   const [placing, setPlacing] = useState<"x1" | "x2" | "y1" | "y2" | null>(null);
 
   function onStageClick(e: any) {
+    // if highlighter is active, ignore clicks (we handle drawing via pointer events)
+    if (highlightEnabled) return;
     if (!imgRef.current) return;
     const stage = stageRef.current;
     const pointer = stage.getPointerPosition();
@@ -285,36 +405,64 @@ export default function App() {
     const diff: number[] = new Array(Math.max(0, profile.length - 1));
     for (let y = 0; y < diff.length; y++) diff[y] = Math.abs(profile[y + 1] - profile[y]);
 
+    // build mask availability map for each row (seg-space 0..segH-1). If highlight disabled, all rows are valid.
+    let validRow: boolean[] = new Array(segH).fill(true);
+    if (highlightEnabled && maskCanvasRef.current) {
+      validRow = new Array(segH).fill(false);
+      try {
+        const mctx = maskCanvasRef.current.getContext("2d");
+        if (mctx) {
+          // sample across horizontal band to mark rows that have any alpha > 0
+          for (let dx = -band; dx <= band; dx++) {
+            const sx = px + dx;
+            if (sx < 0 || sx >= w) continue;
+            const mdata = mctx.getImageData(sx, startY, 1, segH).data;
+            for (let y = 0; y < segH; y++) {
+              if (mdata[y * 4 + 3] > 0) validRow[y] = true;
+            }
+          }
+        } else {
+          // fallback to all valid if mask ctx missing
+          validRow = new Array(segH).fill(true);
+        }
+      } catch (err) {
+        // getImageData may throw if sizes mismatch; fallback to all valid
+        validRow = new Array(segH).fill(true);
+      }
+      // if no rows marked valid, fallback to full region
+      if (!validRow.some(Boolean)) validRow = new Array(segH).fill(true);
+    }
+
     // simple peak picking with robust fallback to ensure we return up to labels.length hits
     const maxDiff = diff.length ? Math.max(...diff) : 0;
     // per-probe or global sensitivity
     const localSensitivity = probe.sensitivity ?? sensitivity;
     const threshold = maxDiff * (0.15 + 0.7 * (1 - localSensitivity)); // invert sens to make slider intuitive
 
-    // 1) find local maxima above threshold
+    // 1) find local maxima above threshold (respect mask when enabled)
     const peaks: number[] = [];
     for (let y = 1; y < diff.length - 1; y++) {
       if (diff[y] > diff[y - 1] && diff[y] > diff[y + 1] && diff[y] >= threshold) {
-        peaks.push(y);
+        if (validRow[y]) peaks.push(y);
       }
     }
 
-    // 2) if not enough, include other local maxima regardless of threshold
+    // 2) if not enough, include other local maxima regardless of threshold (respect mask)
     if (peaks.length < labels.length) {
       for (let y = 1; y < diff.length - 1; y++) {
         if (diff[y] > diff[y - 1] && diff[y] > diff[y + 1]) {
-          if (!peaks.includes(y)) peaks.push(y);
+          if (validRow[y] && !peaks.includes(y)) peaks.push(y);
         }
       }
     }
 
-    // 3) if still not enough, fill using the strongest diff values (avoid very close duplicates)
+    // 3) if still not enough, add strongest diff entries (respect mask)
     if (peaks.length < labels.length) {
       const idxs = diff.map((v, i) => i).sort((a, b) => diff[b] - diff[a]);
       for (const idx of idxs) {
         if (peaks.length >= labels.length) break;
         if (idx <= 0 || idx >= diff.length - 1) continue;
-        // avoid adding indices too close to existing peaks
+        if (!validRow[idx]) continue;
         if (peaks.some((p) => Math.abs(p - idx) <= 2)) continue;
         peaks.push(idx);
       }
@@ -334,14 +482,99 @@ export default function App() {
       return best;
     });
 
-    // We expect number of labels curves: sort candidates top->bottom and take up to labels.length
-    candidates.sort((a, b) => a - b); // top (small y) first
-    const chosenSeg = candidates.slice(0, labels.length);
+    // if still not enough candidates and highlight is on, try adding any valid rows sorted by diff strength
+    if (candidates.length < labels.length) {
+      const extra = diff
+        .map((v, i) => ({ i, v }))
+        .filter((it) => it.i > 0 && it.i < diff.length - 1 && validRow[it.i] && !candidates.includes(it.i))
+        .sort((a, b) => b.v - a.v)
+        .map((it) => it.i);
+      for (const idx of extra) {
+        if (candidates.length >= labels.length) break;
+        candidates.push(idx);
+      }
+    }
+
+    // Now we have candidate indices (in seg-space). Enforce minimum vertical separation and ensure exactly labels.length picks.
+    const MIN_SEP = MIN_VERTICAL_SEPARATION;
+
+    // helper: try to pick N indices from candidates while enforcing MIN_SEP
+    function pickWithSeparation(cands: number[], N: number, validRowArr: boolean[]) {
+      // prefer stronger diffs: sort candidates by diff desc, keep unique
+      const uniq = Array.from(new Set(cands));
+      const byStrength = uniq.sort((a, b) => (diff[b] || 0) - (diff[a] || 0));
+      const selected: number[] = [];
+      for (const c of byStrength) {
+        // must be valid row
+        if (!validRowArr[c]) continue;
+        // ensure separation from already selected
+        if (selected.some((s) => Math.abs(s - c) < MIN_SEP)) continue;
+        selected.push(c);
+        if (selected.length >= N) break;
+      }
+      // if not enough, try to greedily fill by scanning seg from top to bottom picking nearest valid rows not too close
+      if (selected.length < N) {
+        for (let i = 0; i < segH && selected.length < N; i++) {
+          const candidate = i;
+          if (!validRowArr[candidate]) continue;
+          if (selected.some((s) => Math.abs(s - candidate) < MIN_SEP)) continue;
+          selected.push(candidate);
+        }
+      }
+      // if still short, relax separation slightly by allowing equal to MIN_SEP-1 (very rare) — or finally fall back to evenly spaced positions across full seg
+      if (selected.length < N) {
+        // evenly spaced targets across segH
+        const targets: number[] = [];
+        for (let k = 0; k < N; k++) {
+          targets.push(Math.round(((k + 0.5) * segH) / N));
+        }
+        for (const t of targets) {
+          // find nearest valid row to t
+          let best = -1;
+          let bestDist = Infinity;
+          for (let y = 0; y < segH; y++) {
+            if (!validRowArr[y]) continue;
+            const d = Math.abs(y - t);
+            if (d < bestDist && !selected.some((s) => Math.abs(s - y) < MIN_SEP)) {
+              best = y;
+              bestDist = d;
+            }
+          }
+          if (best >= 0) selected.push(best);
+          if (selected.length >= N) break;
+        }
+      }
+      // final pad/truncate
+      const final = Array.from(new Set(selected)).slice(0, N).sort((a, b) => a - b);
+      // if still fewer (shouldn't), fill with nearest valid rows ignoring separation
+      if (final.length < N) {
+        for (let y = 0; y < segH && final.length < N; y++) {
+          if (!validRowArr[y]) continue;
+          if (!final.includes(y)) final.push(y);
+        }
+        final.sort((a, b) => a - b);
+      }
+      return final.slice(0, N);
+    }
+
+    const finalSegIndices = pickWithSeparation(candidates, labels.length, validRow);
+
+    // if highlight was enabled and we couldn't pick enough within mask (edge case), relax to full region
+    if (highlightEnabled && finalSegIndices.length < labels.length) {
+      const allRows = new Array(segH).fill(true);
+      const fallbackSeg = pickWithSeparation(Array.from(Array(segH).keys()), labels.length, allRows);
+      // use fallback if it provides N entries
+      if (fallbackSeg.length === labels.length) {
+        finalSegIndices.splice(0, finalSegIndices.length, ...fallbackSeg);
+      }
+    }
+
     // map to pixel coordinates within original image, then to data coordinates
-    const ysData = chosenSeg.map((segY) => {
+    const ysData = finalSegIndices.map((segY) => {
       const py = startY + segY;
       return pixelToData({ x: px, y: py }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
     });
+
     // store
     setDetectionResults((s) => ({ ...s, [probe.id]: ysData }));
     // update probe automaticY
@@ -645,6 +878,12 @@ export default function App() {
             onDragEnd={(e) => setStagePos({ x: e.target.x(), y: e.target.y() })}
             ref={stageRef}
             onClick={onStageClick}
+            onMouseDown={handlePointerDown}
+            onMouseMove={handlePointerMove}
+            onMouseUp={handlePointerUp}
+            onTouchStart={handlePointerDown}
+            onTouchMove={handlePointerMove}
+            onTouchEnd={handlePointerUp}
           >
             <Layer ref={layerRef}>
               {/* image */}
