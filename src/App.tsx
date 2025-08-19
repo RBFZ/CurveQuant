@@ -1118,8 +1118,16 @@ export default function App() {
                       const py = dataToPixel({ x: p.xData, y: yval }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
                       return (
                         <React.Fragment key={p.id + "_auto_" + idx}>
-                          <Circle x={px} y={py} radius={5} fill="orange" />
-                          <Text x={px + 8} y={py - 8} text={`${label}: ${yval.toFixed(2)}`} fontSize={12} />
+                          <Circle x={px} y={py} radius={probeDotSize} fill="orange" />
+                          {showProbeText && (
+                            <Text
+                              x={px + probeDotSize + 4}
+                              y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
+                              text={`${label}: ${yval.toFixed(2)}`}
+                              fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                              fill="black"
+                            />
+                          )}
                         </React.Fragment>
                       );
                     })}
