@@ -106,6 +106,13 @@ export default function App() {
   const [highlightSize, setHighlightSize] = useState<number>(10);
   const MIN_VERTICAL_SEPARATION = 3;
 
+  // highlighter mode: "pen" (draw) or "eraser" (remove)
+  const [highlightMode, setHighlightMode] = useState<"pen" | "eraser">("pen");
+
+  // probe dot size and whether to show the text label next to the dot
+  const [probeDotSize, setProbeDotSize] = useState<number>(8);
+  const [showProbeText, setShowProbeText] = useState<boolean>(true);
+
   // mask stats (for visible debug indicator)
   const [maskCount, setMaskCount] = useState<number>(0);
 
@@ -178,8 +185,16 @@ export default function App() {
     if (!c || !stroke.length) return;
     const ctx = c.getContext("2d")!;
     ctx.save();
-    ctx.strokeStyle = "rgba(255,230,0,0.45)";
-    ctx.fillStyle = "rgba(255,230,0,0.45)";
+    // set composite mode for eraser vs pen
+    if (highlightMode === "eraser") {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.strokeStyle = "rgba(0,0,0,1)";
+      ctx.fillStyle = "rgba(0,0,0,1)";
+    } else {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.strokeStyle = "rgba(255,230,0,0.45)";
+      ctx.fillStyle = "rgba(255,230,0,0.45)";
+    }
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.lineWidth = Math.max(1, highlightSize) * 2;
@@ -259,6 +274,20 @@ export default function App() {
     }
     const p = probes.find((x) => x.id === activeProbeId);
     setSelProbeBand(p?.bandPx ?? null);
+  }, [activeProbeId, probes]);
+
+  // keyboard handler: press Delete (or Backspace) to remove selected probe
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (activeProbeId) {
+          // removeProbe is defined later in the file
+          try { (removeProbe as any)(activeProbeId); } catch {}
+        }
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeProbeId, probes]);
 
   // Hidden canvas for pixel sampling
@@ -657,6 +686,24 @@ export default function App() {
     setLockImage(false);
   }
 
+  // remove all probes (keeps other state)
+  function clearProbes() {
+    setProbes([]);
+    setDetectionResults({});
+    setActiveProbeId(null);
+  }
+
+  // remove a single probe by id
+  function removeProbe(id: string) {
+    setProbes((ps) => ps.filter((p) => p.id !== id));
+    setDetectionResults((s) => {
+      const copy = { ...s };
+      delete copy[id];
+      return copy;
+    });
+    if (activeProbeId === id) setActiveProbeId(null);
+  }
+
   // run detection for all probes
   function runAllDetections() {
     // clear manual overrides so Detect All fully replaces points (per your request)
@@ -756,6 +803,9 @@ export default function App() {
             <button onClick={() => clearAll()} style={{ marginLeft: 8 }}>
               Clear
             </button>
+            <button onClick={() => clearProbes()} style={{ marginLeft: 8 }}>
+              Remove all probes
+            </button>
             <button onClick={() => setDarkMode((d) => !d)} style={{ marginLeft: 8 }}>
               {darkMode ? "Light" : "Dark"}
             </button>
@@ -788,6 +838,31 @@ export default function App() {
                   onChange={(e) => setHighlightSize(Number(e.target.value))}
                   style={{ verticalAlign: "middle" }}
                 />
+              </label>
+
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                Mode:
+                <select value={highlightMode} onChange={(e) => setHighlightMode(e.target.value as "pen"|"eraser")}>
+                  <option value="pen">Pen</option>
+                  <option value="eraser">Eraser</option>
+                </select>
+              </label>
+
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                Probe dot:
+                <input
+                  type="range"
+                  min={2}
+                  max={24}
+                  value={probeDotSize}
+                  onChange={(e) => setProbeDotSize(Number(e.target.value))}
+                  style={{ verticalAlign: "middle", width: 120 }}
+                />
+              </label>
+
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <input type="checkbox" checked={showProbeText} onChange={(e) => setShowProbeText(e.target.checked)} />
+                Show labels
               </label>
 
               <button onClick={() => { clearHighlight(); updateMaskCount(); }} style={{ padding: "6px 8px", background: "#ff6b6b" }}>
@@ -1011,8 +1086,26 @@ export default function App() {
                       />
                     );
                   })()}
-                  <Circle x={p.pixelX} y={20} radius={8} fill="#222" />
-                  <Text x={p.pixelX + 10} y={8} text={`${p.xData.toFixed(2)} s`} fontSize={14} fill="black" />
+                  <Circle
+                    x={p.pixelX}
+                    y={20}
+                    radius={probeDotSize}
+                    fill="#222"
+                    onClick={(e: any) => {
+                      // prevent stage click events
+                      e.cancelBubble = true;
+                      removeProbe(p.id);
+                    }}
+                  />
+                  {showProbeText && (
+                    <Text
+                      x={p.pixelX + probeDotSize + 4}
+                      y={8}
+                      text={`${p.xData.toFixed(2)} s`}
+                      fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                      fill="black"
+                    />
+                  )}
                   {/* automatic points */}
                   {p.automaticY &&
                     p.automaticY.map((yval, idx) => {
