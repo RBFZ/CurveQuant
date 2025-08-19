@@ -81,6 +81,21 @@ export default function App() {
   });
   const [sensitivityTarget, setSensitivityTarget] = useState<string>("global"); // "global" or probe.id
 
+  // band target (global or probe) and per-probe editing
+  const [bandTarget, setBandTarget] = useState<string>("global"); // "global" or probe.id
+
+  // local slider state to ensure smooth live updates while dragging
+  const [sensitivityLocal, setSensitivityLocal] = useState<number>(sensitivity);
+  const [bandLocal, setBandLocal] = useState<number>(bandPx);
+
+  // refs for scheduling/deduping detection runs while sliding
+  const rafRef = useRef<Record<string, number | null>>({});
+  const rightWidthRef = useRef<number>(320);
+  const [rightWidth, setRightWidth] = useState<number>(320);
+  const resizingRef = useRef<boolean>(false);
+  const startXRef = useRef<number | null>(null);
+  const startWidthRef = useRef<number | null>(null);
+
   // keep selProbe state synced when user selects a probe
   useEffect(() => {
     if (!activeProbeId) {
@@ -301,8 +316,38 @@ export default function App() {
     setProbes((ps) => ps.map((p) => (p.id === probe.id ? { ...p, automaticY: ysData } : p)));
   }
 
+  // schedule detection for a probe with RAF debouncing (cancels prior scheduled run)
+  // accepts optional probeObj to avoid stale-closure lookups when called immediately after state updates
+  function scheduleRunDetectionForProbe(probeId: string, probeObj?: Probe) {
+    if (rafRef.current[probeId]) {
+      cancelAnimationFrame(rafRef.current[probeId] as number);
+      rafRef.current[probeId] = null;
+    }
+    rafRef.current[probeId] = requestAnimationFrame(() => {
+      try {
+        if (probeObj) {
+          // prefer supplied probe object (avoid stale closure issues)
+          runDetectionForProbe(probeObj);
+        } else {
+          const p = probes.find((pp) => pp.id === probeId);
+          if (p) runDetectionForProbe(p);
+        }
+      } finally {
+        rafRef.current[probeId] = null;
+      }
+    });
+  }
+
   // clear everything (full reset)
   function clearAll() {
+    // revoke any created object URL so subsequent loads render correctly
+    try {
+      if (imageObjectURLRef.current) {
+        try { URL.revokeObjectURL(imageObjectURLRef.current); } catch {}
+        imageObjectURLRef.current = null;
+      }
+    } catch {}
+    imgRef.current = null;
     setImageSrc(null);
     setProbes([]);
     setDetectionResults({});
@@ -449,7 +494,16 @@ export default function App() {
           </div>
           <div className="detection-controls">
             <label>Sensitivity</label>
-            <select value={sensitivityTarget} onChange={(e) => setSensitivityTarget(e.target.value)}>
+            <select value={sensitivityTarget} onChange={(e) => {
+              const t = e.target.value;
+              setSensitivityTarget(t);
+              // sync local value to the new target immediately
+              if (t === "global") setSensitivityLocal(sensitivity);
+              else {
+                const p = probes.find(pp => pp.id === t);
+                setSensitivityLocal(p?.sensitivity ?? sensitivity);
+              }
+            }}>
               <option value="global">Global</option>
               {probes.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -457,33 +511,82 @@ export default function App() {
                 </option>
               ))}
             </select>
+
             <input
               type="range"
               min={0}
               max={1}
               step={0.01}
-              value={
-                sensitivityTarget === "global"
-                  ? sensitivity
-                  : (probes.find((p) => p.id === sensitivityTarget)?.sensitivity ?? sensitivity)
-              }
+              value={sensitivityLocal}
               onChange={(e) => {
                 const v = Number(e.target.value);
+                setSensitivityLocal(v);
                 if (sensitivityTarget === "global") {
                   setSensitivity(v);
-                  // re-run all detections with new global sensitivity
-                  setTimeout(() => runAllDetections(), 50);
+                  // re-run all detections but debounce slightly
+                  if (rafRef.current["global"]) cancelAnimationFrame(rafRef.current["global"] as number);
+                  rafRef.current["global"] = requestAnimationFrame(() => {
+                    runAllDetections();
+                    rafRef.current["global"] = null;
+                  });
                 } else {
+                  // update probe sensitivity and schedule its detection via RAF (smooth while sliding)
                   const id = sensitivityTarget;
                   setProbes((ps) => {
                     const updated = ps.map((p) => (p.id === id ? { ...p, sensitivity: v } : p));
-                    const p = updated.find((pp) => pp.id === id);
-                    if (p) setTimeout(() => runDetectionForProbe(p), 50);
+                    const probeObj = updated.find((pp) => pp.id === id) || undefined;
+                    if (probeObj) scheduleRunDetectionForProbe(id, probeObj);
                     return updated;
                   });
                 }
               }}
             />
+
+            <label style={{ marginLeft: 8 }}>Band px</label>
+            <select value={bandTarget} onChange={(e) => {
+              const t = e.target.value;
+              setBandTarget(t);
+              if (t === "global") setBandLocal(bandPx);
+              else {
+                const p = probes.find(pp => pp.id === t);
+                setBandLocal(p?.bandPx ?? bandPx);
+              }
+            }}>
+              <option value="global">Global</option>
+              {probes.map((p) => (
+                <option key={p.id} value={p.id}>{p.id} ({p.xData.toFixed(3)}s)</option>
+              ))}
+            </select>
+            <input
+              type="number"
+              min={0}
+              max={200}
+              value={bandLocal}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setBandLocal(v);
+                if (bandTarget === "global") {
+                  setBandPx(v);
+                  // also propagate to all existing probes immediately
+                  setProbes((ps) => {
+                    const updated = ps.map((p) => ({ ...p, bandPx: v }));
+                    // schedule detection for all updated probes (debounced per-probe)
+                    updated.forEach((p) => scheduleRunDetectionForProbe(p.id, p));
+                    return updated;
+                  });
+                } else {
+                  const id = bandTarget;
+                  setProbes(ps => {
+                    const updated = ps.map(p => p.id === id ? { ...p, bandPx: v } : p);
+                    const probeObj = updated.find(pp => pp.id === id) || undefined;
+                    if (probeObj) scheduleRunDetectionForProbe(id, probeObj);
+                    return updated;
+                  });
+                }
+              }}
+              style={{ width: 70 }}
+            />
+
             <button onClick={() => runAllDetections()}>Detect All</button>
           </div>
         </div>
@@ -595,7 +698,35 @@ export default function App() {
         </div>
       </div>
 
-      <div className="right">
+      <div
+        className="divider"
+        onMouseDown={(e) => {
+          // start resizing
+          resizingRef.current = true;
+          startXRef.current = e.clientX;
+          startWidthRef.current = rightWidthRef.current;
+          // attach move/up handlers
+          const onMove = (ev: MouseEvent) => {
+            if (!resizingRef.current) return;
+            const dx = (startXRef.current === null ? 0 : ev.clientX - startXRef.current);
+            const newW = Math.max(220, Math.min(window.innerWidth - 300, (startWidthRef.current || 320) - dx));
+            rightWidthRef.current = newW;
+            setRightWidth(newW);
+          };
+          const onUp = () => {
+            resizingRef.current = false;
+            startXRef.current = null;
+            startWidthRef.current = null;
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+          };
+          window.addEventListener("mousemove", onMove);
+          window.addEventListener("mouseup", onUp);
+        }}
+        style={{ width: 8, cursor: "col-resize", background: "transparent" }}
+      />
+
+      <div className="right" style={{ width: rightWidth }}>
         <div className="panel">
           <h3>Labels (top → bottom: least → greatest)</h3>
           <div>
