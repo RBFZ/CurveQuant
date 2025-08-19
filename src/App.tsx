@@ -96,6 +96,13 @@ export default function App() {
   const startXRef = useRef<number | null>(null);
   const startWidthRef = useRef<number | null>(null);
 
+  // mask canvas & highlighter state for freehand selection
+  const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [highlightEnabled, setHighlightEnabled] = useState<boolean>(false);
+  const [highlightPath, setHighlightPath] = useState<{ x: number; y: number }[]>([]);
+  const [highlightSize, setHighlightSize] = useState<number>(10);
+  const MIN_VERTICAL_SEPARATION = 3;
+
   // keep selProbe state synced when user selects a probe
   useEffect(() => {
     if (!activeProbeId) {
@@ -173,6 +180,8 @@ export default function App() {
     const pixel = { x: pos.x, y: pos.y };
     if (placing === "x1") {
       setX1({ pixel, value: x1.value });
+      // also set y1 exactly to same pixel as x1 (user requested)
+      setY1({ pixel, value: y1.value });
       setPlacing(null);
     } else if (placing === "x2") {
       // x2 must be to the right of x1; snap vertically to same Y as x1.pixel
