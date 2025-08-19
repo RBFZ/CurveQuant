@@ -106,6 +106,36 @@ export default function App() {
   const [highlightSize, setHighlightSize] = useState<number>(10);
   const MIN_VERTICAL_SEPARATION = 3;
 
+  // mask stats (for visible debug indicator)
+  const [maskCount, setMaskCount] = useState<number>(0);
+
+  function updateMaskCount() {
+    const c = maskCanvasRef.current;
+    if (!c) {
+      setMaskCount(0);
+      return;
+    }
+    try {
+      const ctx = c.getContext("2d");
+      if (!ctx) {
+        setMaskCount(0);
+        return;
+      }
+      const w = c.width;
+      const h = c.height;
+      // count non-transparent pixels but sample every 4th pixel to be faster on large images
+      let count = 0;
+      const s = 4; // sample stride
+      const data = ctx.getImageData(0, 0, w, h).data;
+      for (let i = 3; i < data.length; i += 4 * s) {
+        if (data[i] > 0) count++;
+      }
+      setMaskCount(count);
+    } catch (err) {
+      setMaskCount(0);
+    }
+  }
+
   // ensure mask canvas exists and matches image size
   function ensureMaskCanvas() {
     if (!imgRef.current) return;
@@ -148,8 +178,8 @@ export default function App() {
     if (!c || !stroke.length) return;
     const ctx = c.getContext("2d")!;
     ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,1)";
-    ctx.fillStyle = "rgba(255,255,255,1)";
+    ctx.strokeStyle = "rgba(255,230,0,0.45)";
+    ctx.fillStyle = "rgba(255,230,0,0.45)";
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.lineWidth = Math.max(1, highlightSize) * 2;
@@ -729,6 +759,45 @@ export default function App() {
             <button onClick={() => setDarkMode((d) => !d)} style={{ marginLeft: 8 }}>
               {darkMode ? "Light" : "Dark"}
             </button>
+
+            {/* Highlighter controls (prominent block) */}
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: 12, padding: "6px 8px", borderRadius: 6, border: "1px solid #e6eef8", background: "#f8fbff" }}>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+                <input
+                  type="checkbox"
+                  checked={highlightEnabled}
+                  onChange={(e) => {
+                    const v = e.target.checked;
+                    setHighlightEnabled(v);
+                    if (v) {
+                      ensureMaskCanvas();
+                      setTimeout(() => updateMaskCount(), 50);
+                    }
+                  }}
+                />
+                Highlighter
+              </label>
+
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                Pen:
+                <input
+                  type="range"
+                  min={1}
+                  max={50}
+                  value={highlightSize}
+                  onChange={(e) => setHighlightSize(Number(e.target.value))}
+                  style={{ verticalAlign: "middle" }}
+                />
+              </label>
+
+              <button onClick={() => { clearHighlight(); updateMaskCount(); }} style={{ padding: "6px 8px", background: "#ff6b6b" }}>
+                Clear Highlight
+              </button>
+
+              <div style={{ fontSize: 12, color: "#333", marginLeft: 6 }}>
+                Mask (sampled): {maskCount}
+              </div>
+            </div>
           </div>
           <div className="cal-buttons">
             <div>
@@ -897,6 +966,17 @@ export default function App() {
                       imgRef.current = node.image() as HTMLImageElement;
                     }
                   }}
+                />
+              )}
+
+              {/* visible highlighter overlay (renders the off-screen mask canvas) */}
+              {maskCanvasRef.current && highlightEnabled && (
+                <KImage
+                  image={maskCanvasRef.current}
+                  x={0}
+                  y={0}
+                  listening={false}
+                  opacity={0.55}
                 />
               )}
 
