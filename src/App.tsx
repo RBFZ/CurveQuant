@@ -752,16 +752,18 @@ export default function App() {
     // each probe is a row
     for (const p of sortedProbes) {
       const row: (string | number)[] = [];
-      row.push(p.xData);
+      // export the visual time (respecting timeMultiplier) formatted to 2 decimals
+      row.push((p.xData * timeMultiplier).toFixed(2));
       for (const label of header.slice(1)) {
         // check manual override
         const m = p.manual.find((mm) => mm.label === label);
         if (m) {
-          row.push(m.yData);
+          // manual values: format to 2 decimal places
+          row.push(m.yData.toFixed(2));
         } else if (p.automaticY) {
           // match by index: labels list is typed-order; detection results are top->bottom
           const idx = labels.indexOf(label);
-          if (idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) row.push(Number(p.automaticY[idx].toFixed(3)));
+          if (idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) row.push(p.automaticY[idx].toFixed(2));
           else row.push("");
         } else row.push("");
       }
