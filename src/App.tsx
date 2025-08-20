@@ -49,6 +49,7 @@ export default function App() {
   const [probes, setProbes] = useState<Probe[]>([]);
   const [labels, setLabels] = useState<string[]>(["5", "10", "20"]);
   const [labelsText, setLabelsText] = useState<string>(labels.join(","));
+  const [labelCutoffs, setLabelCutoffs] = useState<Record<string, number | null>>({});
 
   // derived sorted probes for UI and CSV (lowest time first)
   const sortedProbes = [...probes].sort((a, b) => a.xData - b.xData);
@@ -288,19 +289,39 @@ export default function App() {
     setSelProbeBand(p?.bandPx ?? null);
   }, [activeProbeId, probes]);
 
-  // keyboard handler: press Delete (or Backspace) to remove selected probe
+  // keyboard handler: press Delete (or Backspace) to remove selected probe or remove a single label value when active
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (activeProbeId) {
-          // removeProbe is defined later in the file
+        // If a probe and a label are active, remove only that label's value (manual override or automatic)
+        if (activeProbeId && activeLabel) {
+          setProbes((ps) =>
+            ps.map((p) => {
+              if (p.id !== activeProbeId) return p;
+              const idx = labels.indexOf(activeLabel);
+              // If manual override exists for this label, remove it
+              if (p.manual.some((m) => m.label === activeLabel)) {
+                const newManual = p.manual.filter((m) => m.label !== activeLabel);
+                return { ...p, manual: newManual };
+              }
+              // Otherwise hide automatic detection value for that label index (non-destructive)
+              if (p.automaticY && idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) {
+                const newAuto = p.automaticY.slice();
+                newAuto[idx] = undefined as unknown as number;
+                return { ...p, automaticY: newAuto };
+              }
+              return p;
+            })
+          );
+        } else if (activeProbeId) {
+          // fallback: delete entire probe as before
           try { (removeProbe as any)(activeProbeId); } catch {}
         }
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeProbeId, probes]);
+  }, [activeProbeId, activeLabel, labels]);
 
   // Hidden canvas for pixel sampling
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -755,6 +776,12 @@ export default function App() {
       // export the visual time (respecting timeMultiplier) formatted to 2 decimals
       row.push((p.xData * timeMultiplier).toFixed(2));
       for (const label of header.slice(1)) {
+        // respect per-label cutoff: if cutoff exists and probe.xData is beyond it, export blank
+        const cutoff = labelCutoffs[label];
+        if (cutoff != null && p.xData > cutoff) {
+          row.push("");
+          continue;
+        }
         // check manual override
         const m = p.manual.find((mm) => mm.label === label);
         if (m) {
@@ -891,6 +918,11 @@ export default function App() {
                   <tr key={p.id}>
                     <td>{(p.xData * timeMultiplier).toFixed(3)}</td>
                     {labels.map((lab, idx) => {
+                      // respect per-label cutoff: hide values when beyond cutoff
+                      const cutoff = labelCutoffs[lab];
+                      if (cutoff != null && p.xData > cutoff) {
+                        return <td key={lab}> </td>;
+                      }
                       const m = p.manual.find((mm) => mm.label === lab);
                       if (m) return <td key={lab}>{m.yData.toFixed(3)}</td>;
                       if (p.automaticY && idx < p.automaticY.length && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(3)}</td>;
@@ -1314,6 +1346,9 @@ export default function App() {
                     p.automaticY.map((yval, idx) => {
                       if (yval === undefined || yval === null) return null;
                       const label = labels[idx];
+                      // respect per-label cutoff: if set and probe.xData beyond cutoff, hide this point
+                      const cutoff = labelCutoffs[label];
+                      if (cutoff != null && p.xData > cutoff) return null;
                       const hasManual = Boolean(p.manual.find((m) => m.label === label));
                       // skip automatic if replaced by manual
                       if (hasManual) return null;
@@ -1339,6 +1374,9 @@ export default function App() {
 
                   {/* manual points */}
                   {p.manual.map((m) => {
+                    // respect per-label cutoff: hide manual override when beyond cutoff (default behavior)
+                    const cutoff = labelCutoffs[m.label];
+                    if (cutoff != null && p.xData > cutoff) return null;
                     const px = p.pixelX;
                     const py = dataToPixel({ x: p.xData, y: m.yData }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
                     const isActive = p.id === activeProbeId && m.label === activeLabel;
@@ -1412,6 +1450,13 @@ export default function App() {
               onBlur={() => {
                 const parsed = labelsText.split(",").map((s) => s.trim()).filter(Boolean);
                 setLabels(parsed);
+                setLabelCutoffs((prev) => {
+                  const next: Record<string, number | null> = {};
+                  for (const lab of parsed) {
+                    next[lab] = prev[lab] ?? null;
+                  }
+                  return next;
+                });
                 if (parsed.length > 0 && (activeLabel === null || !parsed.includes(activeLabel))) {
                   setActiveLabel(parsed[0]);
                 }
@@ -1423,12 +1468,52 @@ export default function App() {
               <button onClick={() => {
                 const parsed = labelsText.split(",").map((s) => s.trim()).filter(Boolean);
                 setLabels(parsed);
+                setLabelCutoffs((prev) => {
+                  const next: Record<string, number | null> = {};
+                  for (const lab of parsed) {
+                    next[lab] = prev[lab] ?? null;
+                  }
+                  return next;
+                });
                 if (parsed.length > 0 && (activeLabel === null || !parsed.includes(activeLabel))) {
                   setActiveLabel(parsed[0]);
                 }
               }}>Apply labels</button>
             </div>
             <small>Comma-separated numeric labels, e.g. 5,10,20 (edit, then blur or press Apply)</small>
+
+            <div style={{ marginTop: 8 }}>
+              <strong>Label cutoffs (visual units)</strong>
+              <div style={{ marginTop: 6 }}>
+                {labels.map((lab) => (
+                  <div key={lab} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                    <div style={{ width: 36, textAlign: "right" }}>{lab}</div>
+                    <input
+                      type="number"
+                      style={{ width: 120 }}
+                      value={labelCutoffs[lab] != null ? (labelCutoffs[lab]! * timeMultiplier).toString() : ""}
+                      placeholder="cutoff"
+                      onChange={(e) => {
+                        const v = e.target.value.trim();
+                        setLabelCutoffs((prev) => {
+                          const copy = { ...prev };
+                          if (v === "") {
+                            copy[lab] = null;
+                            return copy;
+                          }
+                          const num = Number(v);
+                          if (isNaN(num)) return prev;
+                          copy[lab] = num / timeMultiplier;
+                          return copy;
+                        });
+                      }}
+                    />
+                    <button onClick={() => setLabelCutoffs((prev) => ({ ...prev, [lab]: null }))}>Clear</button>
+                    {labelCutoffs[lab] != null && <span style={{ marginLeft: 8, color: "green" }}>cutoff set</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           <h3>Probes</h3>
@@ -1645,6 +1730,11 @@ export default function App() {
                   <tr key={p.id}>
                     <td>{(p.xData * timeMultiplier).toFixed(3)}</td>
                     {labels.map((lab, idx) => {
+                      // respect per-label cutoff: hide values when beyond cutoff
+                      const cutoff = labelCutoffs[lab];
+                      if (cutoff != null && p.xData > cutoff) {
+                        return <td key={lab}> </td>;
+                      }
                       const m = p.manual.find((mm) => mm.label === lab);
                       if (m) return <td key={lab}>{m.yData.toFixed(3)}</td>;
                       if (p.automaticY && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(3)}</td>;
