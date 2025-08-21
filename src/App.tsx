@@ -94,8 +94,8 @@ export default function App() {
   const sortedProbes = [...probes].sort((a, b) => a.xData - b.xData);
 
   // Detection settings
-  const [sensitivity, setSensitivity] = useState(0.6); // 0..1
-  const [bandPx, setBandPx] = useState(6); // +/- px to search around probe
+  const [sensitivity, setSensitivity] = useState(1); // 0..1
+  const [bandPx, setBandPx] = useState(1); // +/- px to search around probe
   const [detectionResults, setDetectionResults] = useState<Record<string, number[]>>({});
 
   // Generator state for bulk probe creation
@@ -1428,7 +1428,7 @@ export default function App() {
                     const cutoff = labelCutoffs[m.label];
                     if (cutoff != null && p.xData > cutoff) return null;
                     const px = p.pixelX;
-                    const py = dataToPixel({ x: p.xData, y: m.yData }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: y1.value!, x2: y2.value!, y1: y1.value!, y2: y2.value! }).y;
+                    const py = dataToPixel({ x: p.xData, y: m.yData }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
                     const isActive = p.id === activeProbeId && m.label === activeLabel;
                     return (
                       <React.Fragment key={p.id + "_man_" + m.label}>
