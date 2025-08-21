@@ -883,12 +883,12 @@ export default function App() {
         // check manual override
         const m = p.manual.find((mm) => mm.label === label);
         if (m) {
-          // manual values: format to 2 decimal places
-          row.push(m.yData.toFixed(2));
+          // manual values: format to 4 decimal places
+          row.push(m.yData.toFixed(4));
         } else if (p.automaticY) {
           // match by index: labels list is typed-order; detection results are top->bottom
           const idx = labels.indexOf(label);
-          if (idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) row.push(p.automaticY[idx].toFixed(2));
+          if (idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) row.push(p.automaticY[idx].toFixed(4));
           else row.push("");
         } else row.push("");
       }
@@ -1032,8 +1032,8 @@ export default function App() {
                         return <td key={lab}> </td>;
                       }
                       const m = p.manual.find((mm) => mm.label === lab);
-                      if (m) return <td key={lab}>{m.yData.toFixed(3)}</td>;
-                      if (p.automaticY && idx < p.automaticY.length && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(3)}</td>;
+                      if (m) return <td key={lab}>{m.yData.toFixed(4)}</td>;
+                      if (p.automaticY && idx < p.automaticY.length && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(4)}</td>;
                       return <td key={lab}> </td>;
                     })}
                   </tr>
@@ -1410,13 +1410,13 @@ export default function App() {
                             <React.Fragment key={p.id + "_auto_" + idx}>
                               <Circle x={px} y={py} radius={probeDotSize} fill={color} opacity={probeDotOpacity} />
                               {showProbeText && (
-                                <Text
-                                  x={px + probeDotSize + 4}
-                                  y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
-                                  text={`${label}: ${yval.toFixed(2)}`}
-                                  fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
-                                  fill="black"
-                                />
+  <Text
+                            x={px + probeDotSize + 4}
+                            y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
+                            text={`${label}: ${yval.toFixed(4)}`}
+                            fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                            fill="black"
+                          />
                               )}
                             </React.Fragment>
                           );
@@ -1441,7 +1441,7 @@ export default function App() {
                           <Text
                             x={px + probeDotSize + 4}
                             y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
-                            text={`${m.label}: ${m.yData.toFixed(2)}`}
+                            text={`${m.label}: ${m.yData.toFixed(4)}`}
                             fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
                             fill="black"
                           />
@@ -1801,8 +1801,8 @@ export default function App() {
                     <div key={p.id} className={"probe-row" + (p.id === activeProbeId ? " active" : "")} onClick={() => setActiveProbeId(p.id)}>
                       <strong>{p.id}</strong>
                       <div>Time: {(p.xData * timeMultiplier).toFixed(3)}</div>
-                      <div>Auto: {p.automaticY ? p.automaticY.map((v) => v.toFixed(2)).join(", ") : "—"}</div>
-                      <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData.toFixed(2)}`).join(", ") || "—"}</div>
+                      <div>Auto: {p.automaticY ? p.automaticY.map((v) => v.toFixed(4)).join(", ") : "—"}</div>
+                      <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData.toFixed(4)}`).join(", ") || "—"}</div>
                       <button onClick={(ev) => { ev.stopPropagation(); setProbes(ps => ps.filter(q => q.id !== p.id)); }}>Remove</button>
                     </div>
                   ))}
@@ -1872,8 +1872,8 @@ export default function App() {
                         return <td key={lab}> </td>;
                       }
                       const m = p.manual.find((mm) => mm.label === lab);
-                      if (m) return <td key={lab}>{m.yData.toFixed(3)}</td>;
-                      if (p.automaticY && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(3)}</td>;
+                      if (m) return <td key={lab}>{m.yData.toFixed(4)}</td>;
+                      if (p.automaticY && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(4)}</td>;
                       return <td key={lab}> </td>;
                     })}
                   </tr>
@@ -1886,15 +1886,6 @@ export default function App() {
             <button onClick={() => downloadCSV()}>Export CSV</button>
           </div>
 
-          <div style={{ marginTop: 12 }}>
-            <strong>Notes:</strong>
-            <ul>
-              <li>Place x1/x2 on the image (x2 snaps horizontally to x1's row).</li>
-              <li>Place y1/y2 on the image (y2 snaps vertically to y1's column).</li>
-              <li>Enter the numeric values for calibration (e.g., 0 and 30 sec).</li>
-              <li>Add probes and use Detect All or manual picking for overlapped curves.</li>
-            </ul>
-          </div>
         </div>
       </div>
     </div>
