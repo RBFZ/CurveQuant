@@ -3,6 +3,7 @@ import { Stage, Layer, Image as KImage, Line, Circle, Text, Rect } from "react-k
 import useImage from "use-image";
 import { saveAs } from "file-saver";
 import { pixelToData, dataToPixel, exportCSV } from "./utils";
+import CollapsibleSection from "./CollapsibleSection";
 
 type Point = { x: number; y: number };
 type CalPoint = {
@@ -122,6 +123,9 @@ export default function App() {
   // probe dot size and whether to show the text label next to the dot
   const [probeDotSize, setProbeDotSize] = useState<number>(8);
   const [showProbeText, setShowProbeText] = useState<boolean>(true);
+  // display settings: toggle probe vertical lines (dashed) and global dot opacity (0..1)
+  const [showProbeLines, setShowProbeLines] = useState<boolean>(true);
+  const [probeDotOpacity, setProbeDotOpacity] = useState<number>(1);
 
   // manual-entry textarea state (left panel)
   const [manualTextarea, setManualTextarea] = useState<string>("");
@@ -1013,69 +1017,6 @@ export default function App() {
               {darkMode ? "Light" : "Dark"}
             </button>
 
-            {/* Highlighter controls (prominent block) */}
-            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: 12, padding: "6px 8px", borderRadius: 6, border: "1px solid #e6eef8", background: "#f8fbff" }}>
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
-                <input
-                  type="checkbox"
-                  checked={highlightEnabled}
-                  onChange={(e) => {
-                    const v = e.target.checked;
-                    setHighlightEnabled(v);
-                    if (v) {
-                      ensureMaskCanvas();
-                      setTimeout(() => updateMaskCount(), 50);
-                    }
-                  }}
-                />
-                Highlighter
-              </label>
-
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                Pen:
-                <input
-                  type="range"
-                  min={1}
-                  max={50}
-                  value={highlightSize}
-                  onChange={(e) => setHighlightSize(Number(e.target.value))}
-                  style={{ verticalAlign: "middle" }}
-                />
-              </label>
-
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                Mode:
-                <select value={highlightMode} onChange={(e) => setHighlightMode(e.target.value as "pen"|"eraser")}>
-                  <option value="pen">Pen</option>
-                  <option value="eraser">Eraser</option>
-                </select>
-              </label>
-
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                Probe dot:
-                <input
-                  type="range"
-                  min={2}
-                  max={24}
-                  value={probeDotSize}
-                  onChange={(e) => setProbeDotSize(Number(e.target.value))}
-                  style={{ verticalAlign: "middle", width: 120 }}
-                />
-              </label>
-
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                <input type="checkbox" checked={showProbeText} onChange={(e) => setShowProbeText(e.target.checked)} />
-                Show labels
-              </label>
-
-              <button onClick={() => { clearHighlight(); updateMaskCount(); }} style={{ padding: "6px 8px", background: "#ff6b6b" }}>
-                Clear Highlight
-              </button>
-
-              <div style={{ fontSize: 12, color: "#333", marginLeft: 6 }}>
-                Mask (sampled): {maskCount}
-              </div>
-            </div>
           </div>
           <div className="cal-buttons">
             <div>
@@ -1297,6 +1238,7 @@ export default function App() {
                       : 0;
                     return (
                       <>
+                      {showProbeLines && (
                         <Line
                           points={[p.pixelX, yTop, p.pixelX, yBottom]}
                           stroke={p.id === activeProbeId ? "green" : "black"}
@@ -1307,12 +1249,14 @@ export default function App() {
                           onDragMove={(e) => onDragProbe(e, p.id)}
                           onDragEnd={() => onDragEndProbe(p.id)}
                         />
+                      )}
                         {/* top (delete) dot - clicking deletes probe */}
                         <Circle
                           x={p.pixelX}
                           y={yTop}
                           radius={probeDotSize}
                           fill="#222"
+                          opacity={probeDotOpacity}
                           onClick={(e: any) => {
                             e.cancelBubble = true;
                             removeProbe(p.id);
@@ -1324,6 +1268,7 @@ export default function App() {
                           y={yBottom}
                           radius={probeDotSize}
                           fill={p.id === activeProbeId ? "green" : "purple"}
+                          opacity={probeDotOpacity}
                           onClick={(e: any) => {
                             e.cancelBubble = true;
                             setActiveProbeId(p.id === activeProbeId ? null : p.id);
@@ -1356,21 +1301,21 @@ export default function App() {
                       const py = dataToPixel({ x: p.xData, y: yval }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
                       const isActiveLabel = p.id === activeProbeId && idx === labels.indexOf(activeLabel ?? "");
                       const color = isActiveLabel ? "red" : "orange";
-                      return (
-                        <React.Fragment key={p.id + "_auto_" + idx}>
-                          <Circle x={px} y={py} radius={probeDotSize} fill={color} />
-                          {showProbeText && (
-                            <Text
-                              x={px + probeDotSize + 4}
-                              y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
-                              text={`${label}: ${yval.toFixed(2)}`}
-                              fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
-                              fill="black"
-                            />
-                          )}
-                        </React.Fragment>
-                      );
-                    })}
+                          return (
+                            <React.Fragment key={p.id + "_auto_" + idx}>
+                              <Circle x={px} y={py} radius={probeDotSize} fill={color} opacity={probeDotOpacity} />
+                              {showProbeText && (
+                                <Text
+                                  x={px + probeDotSize + 4}
+                                  y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
+                                  text={`${label}: ${yval.toFixed(2)}`}
+                                  fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                                  fill="black"
+                                />
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
 
                   {/* manual points */}
                   {p.manual.map((m) => {
@@ -1378,11 +1323,11 @@ export default function App() {
                     const cutoff = labelCutoffs[m.label];
                     if (cutoff != null && p.xData > cutoff) return null;
                     const px = p.pixelX;
-                    const py = dataToPixel({ x: p.xData, y: m.yData }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
+                    const py = dataToPixel({ x: p.xData, y: m.yData }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: y1.value!, x2: y2.value!, y1: y1.value!, y2: y2.value! }).y;
                     const isActive = p.id === activeProbeId && m.label === activeLabel;
                     return (
                       <React.Fragment key={p.id + "_man_" + m.label}>
-                        <Circle x={px} y={py} radius={probeDotSize} fill="blue" />
+                        <Circle x={px} y={py} radius={probeDotSize} fill="blue" opacity={probeDotOpacity} />
                         {isActive && (
                           // red ring to indicate this manual point is the active label on the active probe
                           <Circle x={px} y={py} radius={Math.max(1, probeDotSize - 1)} stroke="red" strokeWidth={2} fill="transparent" />
@@ -1442,8 +1387,8 @@ export default function App() {
 
       <div className="right" style={{ width: rightWidth }}>
         <div className="panel">
-          <h3>Labels (top → bottom: least → greatest)</h3>
-          <div>
+          <CollapsibleSection title="Label Settings" defaultOpen={false}>
+            <div>
             <textarea
               value={labelsText}
               onChange={(e) => setLabelsText(e.target.value)}
@@ -1515,120 +1460,57 @@ export default function App() {
               </div>
             </div>
           </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection title="Highlighter Settings" defaultOpen={false}>
+            <div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={highlightEnabled}
+                  onChange={(e) => {
+                    const v = e.target.checked;
+                    setHighlightEnabled(v);
+                    if (v) {
+                      ensureMaskCanvas();
+                      setTimeout(() => updateMaskCount(), 50);
+                    }
+                  }}
+                />
+                <span style={{ marginLeft: 8 }}>Highlighter</span>
+              </label>
+
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                <label style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <span>Highlighter Pen</span>
+                  <input
+                    type="range"
+                    min={1}
+                    max={50}
+                    value={highlightSize}
+                    onChange={(e) => setHighlightSize(Number(e.target.value))}
+                  />
+                </label>
+
+                <label style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <span>Mode</span>
+                  <select value={highlightMode} onChange={(e) => setHighlightMode(e.target.value as "pen" | "eraser")}>
+                    <option value="pen">Pen</option>
+                    <option value="eraser">Eraser</option>
+                  </select>
+                </label>
+
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button onClick={() => { clearHighlight(); updateMaskCount(); }}>Clear Highlight</button>
+                  <div style={{ fontSize: 12, color: "var(--muted)" }}>Mask (sampled): {maskCount}</div>
+                </div>
+              </div>
+            </div>
+          </CollapsibleSection>
 
           <h3>Probes</h3>
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-              <button onClick={() => addProbeAtData(null)}>Add probe (center)</button>
-              <select
-                value={activeProbeId ?? ""}
-                onChange={(e) => {
-                  const id = e.target.value || null;
-                  setActiveProbeId(id);
-                }}
-                style={{ minWidth: 160 }}
-              >
-                <option value="">-- select probe --</option>
-                {sortedProbes.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)
-                  </option>
-                ))}
-              </select>
-              <button onClick={() => setProbesCollapsed(pc => !pc)}>{probesCollapsed ? "Expand" : "Collapse"}</button>
-            </div>
-            <div style={{ marginTop: 8 }}>
-              <label>Set probe at X (sec):</label>
-              <input
-                type="number"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    const v = Number((e.target as HTMLInputElement).value);
-                    addProbeAtData(v);
-                  }
-                }}
-                placeholder="type x then Enter"
-              />
-            </div>
-            {!probesCollapsed && (
-              <div style={{ marginTop: 8 }}>
-                {sortedProbes.map((p) => (
-                  <div
-                    key={p.id}
-                    className={"probe-row" + (p.id === activeProbeId ? " active" : "")}
-                    onClick={() => setActiveProbeId(p.id)}
-                  >
-                    <strong>{p.id}</strong>
-                    <div>Time: {(p.xData * timeMultiplier).toFixed(3)}</div>
-                    <div>Auto: {p.automaticY ? p.automaticY.map((v) => v.toFixed(2)).join(", ") : "—"}</div>
-                    <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData.toFixed(2)}`).join(", ") || "—"}</div>
-                    <button onClick={(ev) => { ev.stopPropagation(); setProbes(ps => ps.filter(q => q.id !== p.id)); }}>Remove</button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
 
-          <h3>Probe Detection Settings</h3>
-          <div style={{ marginBottom: 10 }}>
-            <label>Selected probe:</label>
-            <select
-              value={activeProbeId ?? ""}
-              onChange={(e) => setActiveProbeId(e.target.value || null)}
-            >
-              <option value="">--select--</option>
-              {probes.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)
-                </option>
-              ))}
-            </select>
-
-            <div style={{ marginTop: 8 }}>
-              <label>Probe Sensitivity</label>
-              <div>
-                <small>Use the Sensitivity slider above and choose a probe from the dropdown to change a probe's sensitivity.</small>
-              </div>
-            </div>
-            <div style={{ marginTop: 6 }}>
-              <label>Probe Band px</label>
-              <input
-                type="number"
-                min={0}
-                max={200}
-                value={selProbeBand ?? bandPx}
-                onChange={(e) => setSelProbeBand(Number(e.target.value))}
-              />
-            </div>
-            <div style={{ marginTop: 6 }}>
-              <button
-                onClick={() => {
-                  if (!activeProbeId) return;
-                  setProbes((ps) => {
-                    const updated = ps.map((p) => (p.id === activeProbeId ? { ...p, bandPx: selProbeBand ?? null } : p));
-                    const p = updated.find((q) => q.id === activeProbeId);
-                    if (p) setTimeout(() => runDetectionForProbe(p), 50);
-                    return updated;
-                  });
-                }}
-              >
-                Apply to probe
-              </button>
-              <button
-                style={{ marginLeft: 8 }}
-                onClick={() => {
-                  const s = (activeProbeId ? probes.find(p => p.id === activeProbeId)?.sensitivity : null) ?? sensitivity;
-                  const b = selProbeBand ?? bandPx;
-                  setProbes((ps) => ps.map((p) => ({ ...p, sensitivity: s, bandPx: b })));
-                }}
-              >
-                Copy settings to all
-              </button>
-            </div>
-          </div>
-
-          <h3>Generate probes at interval</h3>
-          <div style={{ marginBottom: 10 }}>
+          <CollapsibleSection title="Generate probes at interval" defaultOpen={false}>
             <div>
               <label>Start (s):</label>
               <input type="number" value={genStart} onChange={(e) => setGenStart(Number(e.target.value))} />
@@ -1683,10 +1565,9 @@ export default function App() {
                 Generate probes
               </button>
             </div>
-          </div>
+          </CollapsibleSection>
 
-          <h3>Manual Picking</h3>
-          <div>
+          <CollapsibleSection title="Manual Picking" defaultOpen={false}>
             <label>
               <input type="checkbox" checked={manualMode} onChange={(e) => setManualMode(e.target.checked)} /> Manual mode (lock X and pick Y)
             </label>
@@ -1714,7 +1595,134 @@ export default function App() {
             <div>
               <small>Click on the curve to set the y-value for selected probe/label.</small>
             </div>
-          </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection title="Probe dot & Display" defaultOpen={false}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexDirection: "column" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  Probe dot:
+                  <input
+                    type="range"
+                    min={2}
+                    max={24}
+                    value={probeDotSize}
+                    onChange={(e) => setProbeDotSize(Number(e.target.value))}
+                  />
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="checkbox" checked={showProbeText} onChange={(e) => setShowProbeText(e.target.checked)} />
+                  Show labels
+                </label>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="checkbox" checked={showProbeLines} onChange={(e) => setShowProbeLines(e.target.checked)} />
+                  Show probe lines
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  Dot opacity:
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={probeDotOpacity}
+                    onChange={(e) => setProbeDotOpacity(Number(e.target.value))}
+                  />
+                  <span style={{ width: 48, textAlign: "right" }}>{Math.round(probeDotOpacity * 100)}%</span>
+                </label>
+              </div>
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection title="Probes (list)" defaultOpen={false}>
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <button onClick={() => addProbeAtData(null)}>Add probe (center)</button>
+                <select
+                  value={activeProbeId ?? ""}
+                  onChange={(e) => { setActiveProbeId(e.target.value || null); }}
+                  style={{ minWidth: 160 }}
+                >
+                  <option value="">-- select probe --</option>
+                  {sortedProbes.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)
+                    </option>
+                  ))}
+                </select>
+                <button onClick={() => setProbesCollapsed(pc => !pc)}>{probesCollapsed ? "Expand" : "Collapse"}</button>
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <label>Set probe at X (sec):</label>
+                <input
+                  type="number"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const v = Number((e.target as HTMLInputElement).value);
+                      addProbeAtData(v);
+                    }
+                  }}
+                  placeholder="type x then Enter"
+                />
+              </div>
+              {!probesCollapsed && (
+                <div style={{ marginTop: 8 }}>
+                  {sortedProbes.map((p) => (
+                    <div key={p.id} className={"probe-row" + (p.id === activeProbeId ? " active" : "")} onClick={() => setActiveProbeId(p.id)}>
+                      <strong>{p.id}</strong>
+                      <div>Time: {(p.xData * timeMultiplier).toFixed(3)}</div>
+                      <div>Auto: {p.automaticY ? p.automaticY.map((v) => v.toFixed(2)).join(", ") : "—"}</div>
+                      <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData.toFixed(2)}`).join(", ") || "—"}</div>
+                      <button onClick={(ev) => { ev.stopPropagation(); setProbes(ps => ps.filter(q => q.id !== p.id)); }}>Remove</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection title="Probe Detection Settings" defaultOpen={false}>
+            <div style={{ marginBottom: 10 }}>
+              <label>Selected probe:</label>
+              <select value={activeProbeId ?? ""} onChange={(e) => setActiveProbeId(e.target.value || null)}>
+                <option value="">--select--</option>
+                {probes.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.id} ({(p.xData * timeMultiplier).toFixed(3)}s)
+                  </option>
+                ))}
+              </select>
+
+              <div style={{ marginTop: 8 }}>
+                <label>Probe Sensitivity</label>
+                <div>
+                  <small>Use the Sensitivity slider above and choose a probe from the dropdown to change a probe's sensitivity.</small>
+                </div>
+              </div>
+              <div style={{ marginTop: 6 }}>
+                <label>Probe Band px</label>
+                <input type="number" min={0} max={200} value={selProbeBand ?? bandPx} onChange={(e) => setSelProbeBand(Number(e.target.value))} />
+              </div>
+              <div style={{ marginTop: 6 }}>
+                <button onClick={() => {
+                  if (!activeProbeId) return;
+                  setProbes((ps) => {
+                    const updated = ps.map((p) => (p.id === activeProbeId ? { ...p, bandPx: selProbeBand ?? null } : p));
+                    const p = updated.find((q) => q.id === activeProbeId);
+                    if (p) setTimeout(() => runDetectionForProbe(p), 50);
+                    return updated;
+                  });
+                }}>Apply to probe</button>
+                <button style={{ marginLeft: 8 }} onClick={() => {
+                  const s = (activeProbeId ? probes.find(p => p.id === activeProbeId)?.sensitivity : null) ?? sensitivity;
+                  const b = selProbeBand ?? bandPx;
+                  setProbes((ps) => ps.map((p) => ({ ...p, sensitivity: s, bandPx: b })));
+                }}>Copy settings to all</button>
+              </div>
+            </div>
+          </CollapsibleSection>
 
           <h3>Table Preview</h3>
           <div className="table-preview">

@@ -170,3 +170,64 @@ small{ color:var(--muted); }
 .dark .toolbar, .dark .panel { box-shadow: none; border: 1px solid rgba(255,255,255,0.03); }
 .dark .table-preview { background: #07101a; border-color: rgba(255,255,255,0.03); }
 .dark .probe-row.active { background: linear-gradient(90deg, rgba(77,163,255,0.06), transparent); border-color: rgba(77,163,255,0.12); }
+
+/* Collapsible sections */
+.collapsible { margin-bottom: 10px; }
+.collapsible-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--muted);
+  border-radius: 6px;
+  text-align: left;
+}
+.collapsible-header:focus { outline: 2px solid rgba(11,95,255,0.12); outline-offset: 2px; }
+
+.collapsible-arrow {
+  display: inline-block;
+  transition: transform 0.18s ease;
+  transform-origin: center;
+  width: 14px;
+  text-align: center;
+  font-weight: 700;
+}
+.collapsible-arrow.open { transform: rotate(90deg); }
+
+.collapsible-title { flex: 1; }
+
+.collapsible-body {
+  padding: 8px 0 12px 0;
+  color: var(--text);
+}
+
+/* Make form controls easier to read on light backgrounds: remove solid white fill and ensure text is high contrast */
+input[type="number"],
+input[type="text"],
+textarea,
+select {
+  padding: 6px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+}
+
+/* Keep buttons as-is but ensure small select/inputs visually align in collapsible bodies */
+.collapsible-body input,
+.collapsible-body select,
+.collapsible-body textarea {
+  background: transparent;
+  color: var(--text);
+}
+
+/* Slightly smaller spacing for nested subsections */
+.collapsible .collapsible { margin-top: 6px; margin-bottom: 6px; padding-left: 6px; border-left: 2px solid rgba(0,0,0,0.03); }
+
+.dark .collapsible-header { color: var(--muted); }
