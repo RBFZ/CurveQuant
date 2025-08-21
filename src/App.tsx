@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from "react";
-import { Stage, Layer, Image as KImage, Line, Circle, Text, Rect } from "react-konva";
+import { Stage, Layer, Image as KImage, Line, Circle, Text } from "react-konva";
 import useImage from "use-image";
 import { saveAs } from "file-saver";
 import { pixelToData, dataToPixel, exportCSV } from "./utils";
@@ -24,6 +24,28 @@ type Probe = {
 
 function uid(prefix = "") {
   return prefix + Math.random().toString(36).slice(2, 9);
+}
+
+// Palette: names + hex colors (deterministic categorical palette)
+const PALETTE: { name: string; hex: string }[] = [
+  { name: "Orange", hex: "#ff9800" },
+  { name: "Blue", hex: "#2196f3" },
+  { name: "Green", hex: "#4caf50" },
+  { name: "Purple", hex: "#9c27b0" },
+  { name: "Red", hex: "#f44336" },
+  { name: "Teal", hex: "#009688" },
+  { name: "Amber", hex: "#ffc107" },
+  { name: "Indigo", hex: "#3f51b5" },
+  { name: "Pink", hex: "#e91e63" },
+  { name: "Lime", hex: "#cddc39" },
+  { name: "Brown", hex: "#795548" },
+  { name: "Cyan", hex: "#00bcd4" },
+];
+
+function hexToRgb(hex: string) {
+  const h = hex.replace("#", "");
+  const bigint = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
+  return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
 }
 
 export default function App() {
@@ -52,6 +74,22 @@ export default function App() {
   const [labelsText, setLabelsText] = useState<string>(labels.join(","));
   const [labelCutoffs, setLabelCutoffs] = useState<Record<string, number | null>>({});
 
+  // label -> hex color and label -> palette name
+  const [labelColors, setLabelColors] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    labels.forEach((l, i) => {
+      out[l] = PALETTE[i % PALETTE.length].hex;
+    });
+    return out;
+  });
+  const [labelColorNames, setLabelColorNames] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    labels.forEach((l, i) => {
+      out[l] = PALETTE[i % PALETTE.length].name;
+    });
+    return out;
+  });
+
   // derived sorted probes for UI and CSV (lowest time first)
   const sortedProbes = [...probes].sort((a, b) => a.xData - b.xData);
 
@@ -68,6 +106,8 @@ export default function App() {
   // visual-only multiplier for displayed times: 1 or 60
   const [timeMultiplier, setTimeMultiplier] = useState<number>(1);
 
+  // highlighter painting target label (which label's color is used for painting)
+  const [paintLabel, setPaintLabel] = useState<string | null>(labels[0] || null);
 
   // Manual mode
   const [manualMode, setManualMode] = useState(false);
@@ -110,7 +150,9 @@ export default function App() {
   // mask canvas & highlighter state for freehand selection
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   // keep strokes painted directly to the mask canvas so disconnected areas are supported
+  // each stroke: { points: Point[], label: string }
   const highlightPathsRef = useRef<{ x: number; y: number }[][]>([]);
+  const highlightStrokesMetaRef = useRef<{ points: Point[]; label: string }[]>([]);
   const drawingRef = useRef<boolean>(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
   const [highlightEnabled, setHighlightEnabled] = useState<boolean>(false);
@@ -179,11 +221,13 @@ export default function App() {
       }
       // reset stored strokes (we'll keep mask canvas authoritative)
       highlightPathsRef.current = [];
+      highlightStrokesMetaRef.current = [];
     }
   }
 
   function clearHighlight() {
     highlightPathsRef.current = [];
+    highlightStrokesMetaRef.current = [];
     const c = maskCanvasRef.current;
     if (c) {
       const ctx = c.getContext("2d");
@@ -195,8 +239,9 @@ export default function App() {
     try { layerRef.current?.batchDraw(); } catch {}
   }
 
-  // paint a single stroke (array of points) to the mask canvas (white opaque)
-  function paintStrokeToMask(stroke: { x: number; y: number }[]) {
+  // paint a single stroke (array of points) to the mask canvas
+  // colorHex: e.g. "#ff9800" when drawing as pen. Eraser mode uses destination-out and ignores color.
+  function paintStrokeToMask(stroke: { x: number; y: number }[], colorHex?: string) {
     ensureMaskCanvas();
     const c = maskCanvasRef.current;
     if (!c || !stroke.length) return;
@@ -209,8 +254,11 @@ export default function App() {
       ctx.fillStyle = "rgba(0,0,0,1)";
     } else {
       ctx.globalCompositeOperation = "source-over";
-      ctx.strokeStyle = "rgba(255,230,0,0.45)";
-      ctx.fillStyle = "rgba(255,230,0,0.45)";
+      // paint fully opaque color on mask so detection can test exact color
+      const hex = colorHex || "#ffff00";
+      const rgb = hexToRgb(hex);
+      ctx.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},1)`;
+      ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},1)`;
     }
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
@@ -256,8 +304,11 @@ export default function App() {
     if (!pos) return;
     lastPointRef.current = pos;
     highlightPathsRef.current.push([pos]);
-    // paint initial dot immediately
-    paintStrokeToMask([pos]);
+    // record meta stroke label for potential redraw/clear per-label
+    const labelToPaint = paintLabel ?? labels[0] ?? "";
+    highlightStrokesMetaRef.current.push({ points: [pos], label: labelToPaint });
+    // paint initial dot immediately using the color for paintLabel
+    paintStrokeToMask([pos], labelColors[labelToPaint]);
   }
 
   function handlePointerMove(e: any) {
@@ -268,8 +319,12 @@ export default function App() {
     const curStroke = highlightPathsRef.current[highlightPathsRef.current.length - 1];
     if (!curStroke) return;
     curStroke.push(pos);
+    // update meta stroke points as well
+    const meta = highlightStrokesMetaRef.current[highlightStrokesMetaRef.current.length - 1];
+    if (meta) meta.points.push(pos);
     // paint incremental segment to mask to avoid heavy re-painting full stroke each move
-    paintStrokeToMask(curStroke.slice(Math.max(0, curStroke.length - 8)));
+    const labelToPaint = meta?.label ?? paintLabel ?? labels[0] ?? "";
+    paintStrokeToMask(curStroke.slice(Math.max(0, curStroke.length - 8)), labelColors[labelToPaint]);
     lastPointRef.current = pos;
   }
 
@@ -279,8 +334,10 @@ export default function App() {
     drawingRef.current = false;
     // paint entire stroke to ensure continuity
     const stroke = highlightPathsRef.current[highlightPathsRef.current.length - 1];
-    if (stroke) paintStrokeToMask(stroke);
+    const meta = highlightStrokesMetaRef.current[highlightStrokesMetaRef.current.length - 1];
+    if (stroke && meta) paintStrokeToMask(stroke, labelColors[meta.label]);
     lastPointRef.current = null;
+    setTimeout(() => updateMaskCount(), 30);
   }
 
   // keep selProbe state synced when user selects a probe
@@ -302,7 +359,7 @@ export default function App() {
           setProbes((ps) =>
             ps.map((p) => {
               if (p.id !== activeProbeId) return p;
-              const idx = labels.indexOf(activeLabel);
+              const idx = labels.indexOf(activeLabel as string);
               // If manual override exists for this label, remove it
               if (p.manual.some((m) => m.label === activeLabel)) {
                 const newManual = p.manual.filter((m) => m.label !== activeLabel);
@@ -426,24 +483,41 @@ export default function App() {
       }
       setPlacing(null);
     } else if (manualMode && activeProbeId && activeLabel) {
-      // manual picking: lock x to probe pixel and take y from click
-      const probe = probes.find((p) => p.id === activeProbeId);
-      if (!probe) return;
-      const lockedPixel = { x: probe.pixelX, y: pixel.y };
-      const yDataPicked = pixelToData(lockedPixel, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value }).y;
-      // set manual override and remove corresponding automatic dot for this label index (so manual hides auto)
-      const idx = labels.indexOf(activeLabel as string);
-      const updated = probes.map((p) => {
-        if (p.id !== activeProbeId) return p;
-        const newManual = p.manual.filter((m) => m.label !== activeLabel);
-        newManual.push({ label: activeLabel as string, yData: yDataPicked });
-        let newAuto = p.automaticY ? p.automaticY.slice() : null;
-        if (newAuto && idx >= 0 && idx < newAuto.length) {
-          newAuto[idx] = undefined as unknown as number;
+      // manual picking: guard and handle errors so UI doesn't crash
+      try {
+        // require calibration for accurate manual picks
+        if (!calibrated()) {
+          alert("Please calibrate axes first.");
+          return;
         }
-        return { ...p, manual: newManual, automaticY: newAuto };
-      });
-      setProbes(updated);
+        const probe = probes.find((p) => p.id === activeProbeId);
+        if (!probe) return;
+        const lockedPixel = { x: probe.pixelX, y: pixel.y };
+        const yDataPicked = pixelToData(
+          lockedPixel,
+          { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel },
+          { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value }
+        ).y;
+        const idx = labels.indexOf(activeLabel as string);
+        // update using functional setState to avoid stale closures
+        setProbes((ps) =>
+          ps.map((p) => {
+            if (p.id !== activeProbeId) return p;
+            const newManual = p.manual.filter((m) => m.label !== activeLabel);
+            newManual.push({ label: activeLabel as string, yData: yDataPicked });
+            const newAuto = p.automaticY ? p.automaticY.slice() : null;
+            if (newAuto && idx >= 0 && idx < newAuto.length) {
+              newAuto[idx] = undefined as unknown as number;
+            }
+            return { ...p, manual: newManual, automaticY: newAuto };
+          })
+        );
+      } catch (err) {
+        // log and surface a friendly error without breaking the UI
+        // eslint-disable-next-line no-console
+        console.error("Manual pick error:", err);
+        alert("An error occurred while setting the manual pick. See console for details.");
+      }
     }
   }
 
@@ -465,7 +539,7 @@ export default function App() {
     setTimeout(() => runDetectionForProbe(p), 50);
   }
 
-  // Run detection for a probe: simple brightness-based detection across a vertical band
+  // Run detection for a probe: modified to respect per-label colored mask
   function runDetectionForProbe(probe: Probe) {
     if (!imgRef.current || !calibrated()) return;
     const imgEl = imgRef.current;
@@ -503,172 +577,182 @@ export default function App() {
     const diff: number[] = new Array(Math.max(0, profile.length - 1));
     for (let y = 0; y < diff.length; y++) diff[y] = Math.abs(profile[y + 1] - profile[y]);
 
-    // build mask availability map for each row (seg-space 0..segH-1). If highlight disabled, all rows are valid.
-    let validRow: boolean[] = new Array(segH).fill(true);
+    // Build per-label validRow arrays: true where that label's mask color appears within the horizontal band.
+    // If no pixels are found inside the narrow band, also try a full-width scan for that label so we can
+    // fall back to the highlighted curve even when the band sampling misses it.
+    const labelValidRows: Record<string, boolean[]> = {};
     if (highlightEnabled && maskCanvasRef.current) {
-      validRow = new Array(segH).fill(false);
       try {
         const mctx = maskCanvasRef.current.getContext("2d");
         if (mctx) {
-          // sample across horizontal band to mark rows that have any alpha > 0
-          for (let dx = -band; dx <= band; dx++) {
-            const sx = px + dx;
-            if (sx < 0 || sx >= w) continue;
-            const mdata = mctx.getImageData(sx, startY, 1, segH).data;
-            for (let y = 0; y < segH; y++) {
-              if (mdata[y * 4 + 3] > 0) validRow[y] = true;
+          const left = Math.max(0, px - band);
+          const right = Math.min(w - 1, px + band);
+          const widthBand = right - left + 1;
+          // precompute RGB for each label once
+          const labelRgb: Record<string, { r: number; g: number; b: number }> = {};
+          labels.forEach((lab) => {
+            const hex = labelColors[lab] ?? "#ffff00";
+            labelRgb[lab] = hexToRgb(hex);
+          });
+          const TOL = 40; // color tolerance (to allow some anti-aliasing)
+
+          // 1) Try narrow-band scan around probe x (fast and preferred)
+          if (widthBand > 0) {
+            const mdata = mctx.getImageData(left, startY, widthBand, segH).data;
+            for (const lab of labels) labelValidRows[lab] = new Array(segH).fill(false);
+            for (let row = 0; row < segH; row++) {
+              for (let col = 0; col < widthBand; col++) {
+                const idx = (row * widthBand + col) * 4;
+                const a = mdata[idx + 3];
+                if (a === 0) continue;
+                const r = mdata[idx], g = mdata[idx + 1], b = mdata[idx + 2];
+                for (const lab of labels) {
+                  const rgb = labelRgb[lab];
+                  if (Math.abs(r - rgb.r) <= TOL && Math.abs(g - rgb.g) <= TOL && Math.abs(b - rgb.b) <= TOL) {
+                    labelValidRows[lab][row] = true;
+                  }
+                }
+              }
+            }
+            // remove entries that found nothing to allow fallback to full-width scan
+            for (const lab of labels) {
+              if (!labelValidRows[lab].some(Boolean)) {
+                delete labelValidRows[lab];
+              }
             }
           }
-        } else {
-          // fallback to all valid if mask ctx missing
-          validRow = new Array(segH).fill(true);
+
+          // 2) For any label that still has no band hits, do a full-width scan across the same vertical range.
+          // This ensures we can place points on the highlighted curve even if the narrow band missed it.
+          const missing = labels.filter((lab) => !(lab in labelValidRows));
+          if (missing.length > 0) {
+            const fullData = mctx.getImageData(0, startY, w, segH).data;
+            // prepare arrays for missing labels
+            for (const lab of missing) labelValidRows[lab] = new Array(segH).fill(false);
+            for (let row = 0; row < segH; row++) {
+              for (let col = 0; col < w; col++) {
+                const idx = (row * w + col) * 4;
+                const a = fullData[idx + 3];
+                if (a === 0) continue;
+                const r = fullData[idx], g = fullData[idx + 1], b = fullData[idx + 2];
+                for (const lab of missing) {
+                  const rgb = labelRgb[lab];
+                  if (Math.abs(r - rgb.r) <= TOL && Math.abs(g - rgb.g) <= TOL && Math.abs(b - rgb.b) <= TOL) {
+                    labelValidRows[lab][row] = true;
+                  }
+                }
+              }
+            }
+            // if any label still has no hits after full-width scan, remove its entry so detection can fallback to unmasked logic
+            for (const lab of missing) {
+              if (!labelValidRows[lab].some(Boolean)) delete labelValidRows[lab];
+            }
+          }
         }
       } catch (err) {
-        // getImageData may throw if sizes mismatch; fallback to all valid
-        validRow = new Array(segH).fill(true);
+        // failures (e.g., security/canvas errors) fall back to no-label masks
       }
-      // if no rows marked valid, fallback to full region
-      if (!validRow.some(Boolean)) validRow = new Array(segH).fill(true);
     }
 
-    // simple peak picking with robust fallback to ensure we return up to labels.length hits
+    // per-label selection: for each label, pick one row index (in seg-space) using constraints
+    const picks: number[] = [];
+    const MIN_SEP = MIN_VERTICAL_SEPARATION;
     const maxDiff = diff.length ? Math.max(...diff) : 0;
-    // per-probe or global sensitivity
     const localSensitivity = probe.sensitivity ?? sensitivity;
     const threshold = maxDiff * (0.15 + 0.7 * (1 - localSensitivity)); // invert sens to make slider intuitive
 
-    // 1) find local maxima above threshold (respect mask when enabled)
-    const peaks: number[] = [];
-    for (let y = 1; y < diff.length - 1; y++) {
-      if (diff[y] > diff[y - 1] && diff[y] > diff[y + 1] && diff[y] >= threshold) {
-        if (validRow[y]) peaks.push(y);
+    // helper to find best candidate row for a label
+    // Improvements:
+    // - If a mask (valid) exists for the label, prefer rows inside that mask as a final fallback.
+    // - Choose a median/nearest valid row to ensure a dot is produced even when diff/profile is unhelpful.
+    function pickForLabel(labelIdx: number): number {
+      const lab = labels[labelIdx];
+      const valid = labelValidRows[lab] ?? null; // if null => no mask for this label
+      // find local maxima above threshold and respecting valid when present
+      const strong: number[] = [];
+      for (let y = 1; y < diff.length - 1; y++) {
+        if (diff[y] > diff[y - 1] && diff[y] > diff[y + 1] && diff[y] >= threshold) {
+          if (!valid || valid[y]) strong.push(y);
+        }
       }
-    }
+      if (strong.length) {
+        // pick the strongest among them (max diff)
+        strong.sort((a, b) => diff[b] - diff[a]);
+        for (const cand of strong) {
+          if (!picks.some((s) => Math.abs(s - cand) < MIN_SEP)) return cand;
+        }
+      }
 
-    // 2) if not enough, include other local maxima regardless of threshold (respect mask)
-    if (peaks.length < labels.length) {
+      // next, any local maxima respecting valid
+      const locals: number[] = [];
       for (let y = 1; y < diff.length - 1; y++) {
         if (diff[y] > diff[y - 1] && diff[y] > diff[y + 1]) {
-          if (validRow[y] && !peaks.includes(y)) peaks.push(y);
+          if (!valid || valid[y]) locals.push(y);
         }
       }
-    }
+      if (locals.length) {
+        locals.sort((a, b) => diff[b] - diff[a]);
+        for (const cand of locals) {
+          if (!picks.some((s) => Math.abs(s - cand) < MIN_SEP)) return cand;
+        }
+      }
 
-    // 3) if still not enough, add strongest diff entries (respect mask)
-    if (peaks.length < labels.length) {
-      const idxs = diff.map((v, i) => i).sort((a, b) => diff[b] - diff[a]);
+      // next, strongest diff entries where valid (or any if no valid)
+      const idxs = diff.map((v, i) => i).filter((i) => i > 0 && i < diff.length - 1);
+      idxs.sort((a, b) => diff[b] - diff[a]);
       for (const idx of idxs) {
-        if (peaks.length >= labels.length) break;
-        if (idx <= 0 || idx >= diff.length - 1) continue;
-        if (!validRow[idx]) continue;
-        if (peaks.some((p) => Math.abs(p - idx) <= 2)) continue;
-        peaks.push(idx);
+        if (valid && !valid[idx]) continue;
+        if (!picks.some((s) => Math.abs(s - idx) < MIN_SEP)) return idx;
       }
-    }
 
-    // refine peaks: choose center of stroke by scanning around peak for min brightness (dark stroke)
-    const candidates: number[] = peaks.map((py) => {
-      let best = py;
-      const r = 6;
-      let minB = Infinity;
-      for (let yy = Math.max(0, py - r); yy <= Math.min(profile.length - 1, py + r); yy++) {
-        if (profile[yy] < minB) {
-          minB = profile[yy];
-          best = yy;
-        }
-      }
-      return best;
-    });
-
-    // if still not enough candidates and highlight is on, try adding any valid rows sorted by diff strength
-    if (candidates.length < labels.length) {
-      const extra = diff
-        .map((v, i) => ({ i, v }))
-        .filter((it) => it.i > 0 && it.i < diff.length - 1 && validRow[it.i] && !candidates.includes(it.i))
-        .sort((a, b) => b.v - a.v)
-        .map((it) => it.i);
-      for (const idx of extra) {
-        if (candidates.length >= labels.length) break;
-        candidates.push(idx);
-      }
-    }
-
-    // Now we have candidate indices (in seg-space). Enforce minimum vertical separation and ensure exactly labels.length picks.
-    const MIN_SEP = MIN_VERTICAL_SEPARATION;
-
-    // helper: try to pick N indices from candidates while enforcing MIN_SEP
-    function pickWithSeparation(cands: number[], N: number, validRowArr: boolean[]) {
-      // prefer stronger diffs: sort candidates by diff desc, keep unique
-      const uniq = Array.from(new Set(cands));
-      const byStrength = uniq.sort((a, b) => (diff[b] || 0) - (diff[a] || 0));
-      const selected: number[] = [];
-      for (const c of byStrength) {
-        // must be valid row
-        if (!validRowArr[c]) continue;
-        // ensure separation from already selected
-        if (selected.some((s) => Math.abs(s - c) < MIN_SEP)) continue;
-        selected.push(c);
-        if (selected.length >= N) break;
-      }
-      // if not enough, try to greedily fill by scanning seg from top to bottom picking nearest valid rows not too close
-      if (selected.length < N) {
-        for (let i = 0; i < segH && selected.length < N; i++) {
-          const candidate = i;
-          if (!validRowArr[candidate]) continue;
-          if (selected.some((s) => Math.abs(s - candidate) < MIN_SEP)) continue;
-          selected.push(candidate);
-        }
-      }
-      // if still short, relax separation slightly by allowing equal to MIN_SEP-1 (very rare) — or finally fall back to evenly spaced positions across full seg
-      if (selected.length < N) {
-        // evenly spaced targets across segH
-        const targets: number[] = [];
-        for (let k = 0; k < N; k++) {
-          targets.push(Math.round(((k + 0.5) * segH) / N));
-        }
-        for (const t of targets) {
-          // find nearest valid row to t
-          let best = -1;
-          let bestDist = Infinity;
-          for (let y = 0; y < segH; y++) {
-            if (!validRowArr[y]) continue;
-            const d = Math.abs(y - t);
-            if (d < bestDist && !selected.some((s) => Math.abs(s - y) < MIN_SEP)) {
-              best = y;
-              bestDist = d;
-            }
+      // If we have mask-valid rows for this label, prefer a valid row closest to the evenly spaced target.
+      if (valid && valid.some(Boolean)) {
+        const target = Math.round(((labelIdx + 0.5) * segH) / labels.length);
+        let bestValid = -1;
+        let bestDistValid = Infinity;
+        for (let y = 0; y < segH; y++) {
+          if (!valid[y]) continue;
+          if (picks.some((s) => Math.abs(s - y) < MIN_SEP)) continue;
+          const d = Math.abs(y - target);
+          if (d < bestDistValid) {
+            bestDistValid = d;
+            bestValid = y;
           }
-          if (best >= 0) selected.push(best);
-          if (selected.length >= N) break;
+        }
+        if (bestValid >= 0) return bestValid;
+        // if all valid rows are too close to existing picks, return any valid row
+        for (let y = 0; y < segH; y++) {
+          if (valid[y]) return y;
         }
       }
-      // final pad/truncate
-      const final = Array.from(new Set(selected)).slice(0, N).sort((a, b) => a - b);
-      // if still fewer (shouldn't), fill with nearest valid rows ignoring separation
-      if (final.length < N) {
-        for (let y = 0; y < segH && final.length < N; y++) {
-          if (!validRowArr[y]) continue;
-          if (!final.includes(y)) final.push(y);
+
+      // fallback: evenly spaced target for this label, find nearest row to target (ignore mask)
+      const target = Math.round(((labelIdx + 0.5) * segH) / labels.length);
+      let best = -1;
+      let bestDist = Infinity;
+      for (let y = 0; y < segH; y++) {
+        const d = Math.abs(y - target);
+        if (d < bestDist && !picks.some((s) => Math.abs(s - y) < MIN_SEP)) {
+          bestDist = d;
+          best = y;
         }
-        final.sort((a, b) => a - b);
       }
-      return final.slice(0, N);
+      if (best >= 0) return best;
+
+      // final fallback: allow any row
+      for (let y = 0; y < segH; y++) return y;
+
+      // if nothing, return middle
+      return Math.floor(segH / 2);
     }
 
-    const finalSegIndices = pickWithSeparation(candidates, labels.length, validRow);
-
-    // if highlight was enabled and we couldn't pick enough within mask (edge case), relax to full region
-    if (highlightEnabled && finalSegIndices.length < labels.length) {
-      const allRows = new Array(segH).fill(true);
-      const fallbackSeg = pickWithSeparation(Array.from(Array(segH).keys()), labels.length, allRows);
-      // use fallback if it provides N entries
-      if (fallbackSeg.length === labels.length) {
-        finalSegIndices.splice(0, finalSegIndices.length, ...fallbackSeg);
-      }
+    for (let i = 0; i < labels.length; i++) {
+      const pick = pickForLabel(i);
+      picks.push(pick);
     }
 
-    // map to pixel coordinates within original image, then to data coordinates
-    const ysData = finalSegIndices.map((segY) => {
+    // map picks (seg-space) -> pixel -> data y
+    const ysData = picks.map((segY) => {
       const py = startY + segY;
       return pixelToData({ x: px, y: py }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
     });
@@ -720,9 +804,19 @@ export default function App() {
     setY2({ pixel: null, value: 50 });
     setLabels(["5", "10", "20"]);
     setLabelsText("5,10,20");
+    // reset color mapping
+    const initialColors: Record<string, string> = {};
+    const initialNames: Record<string, string> = {};
+    ["5", "10", "20"].forEach((l, i) => {
+      initialColors[l] = PALETTE[i % PALETTE.length].hex;
+      initialNames[l] = PALETTE[i % PALETTE.length].name;
+    });
+    setLabelColors(initialColors);
+    setLabelColorNames(initialNames);
     setActiveProbeId(null);
     setManualMode(false);
     setLockImage(false);
+    clearHighlight();
   }
 
   // remove all probes (keeps other state)
@@ -863,15 +957,6 @@ export default function App() {
     setTimeMultiplier((t) => (t === 1 ? 60 : 1));
   }
 
-  // convert minutes to seconds (multiplies times by 60, keeps pixelX)
-  // function convertMinutesToSeconds() {
-  //   setX1((s) => ({ ...s, value: s.value !== null && s.value !== undefined ? s.value * 60 : s.value }));
-  //   setX2((s) => ({ ...s, value: s.value !== null && s.value !== undefined ? s.value * 60 : s.value }));
-  //   setGenStart((g) => g * 60);
-  //   setGenEnd((g) => g * 60);
-  //   setProbes((ps) => ps.map((p) => ({ ...p, xData: p.xData * 60 })));
-  // }
-
   // Render helpers
   function renderCalibrationMarkers() {
     const items: any[] = [];
@@ -901,6 +986,25 @@ export default function App() {
   function pixelXToData(px: number) {
     const p = pixelToData({ x: px, y: 0 }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! });
     return p.x;
+  }
+
+  // When labels change (Apply labels), create/refresh label color mappings
+  // Ensure each label receives a unique color from the palette (do not merge with previous mappings)
+  function assignColorsForLabels(parsed: string[]) {
+    const nextColors: Record<string, string> = {};
+    const nextNames: Record<string, string> = {};
+    for (let i = 0; i < parsed.length; i++) {
+      const lab = parsed[i];
+      const p = PALETTE[i % PALETTE.length];
+      nextColors[lab] = p.hex;
+      nextNames[lab] = p.name;
+    }
+    // Replace the entire mapping to guarantee uniqueness across labels
+    setLabelColors(nextColors);
+    setLabelColorNames(nextNames);
+    // ensure paintLabel and activeLabel are valid for the new label set
+    if (!paintLabel || (parsed.length > 0 && !parsed.includes(paintLabel))) setPaintLabel(parsed.length > 0 ? parsed[0] : null);
+    if (!activeLabel || (parsed.length > 0 && !parsed.includes(activeLabel))) setActiveLabel(parsed.length > 0 ? parsed[0] : null);
   }
 
   return (
@@ -1300,7 +1404,8 @@ export default function App() {
                       const px = p.pixelX;
                       const py = dataToPixel({ x: p.xData, y: yval }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
                       const isActiveLabel = p.id === activeProbeId && idx === labels.indexOf(activeLabel ?? "");
-                      const color = isActiveLabel ? "red" : "orange";
+                      // highlight the active label's dot in cyan for the selected probe
+                      const color = isActiveLabel ? "#00bcd4" : (labelColors[label] ?? "orange");
                           return (
                             <React.Fragment key={p.id + "_auto_" + idx}>
                               <Circle x={px} y={py} radius={probeDotSize} fill={color} opacity={probeDotOpacity} />
@@ -1402,6 +1507,7 @@ export default function App() {
                   }
                   return next;
                 });
+                assignColorsForLabels(parsed);
                 if (parsed.length > 0 && (activeLabel === null || !parsed.includes(activeLabel))) {
                   setActiveLabel(parsed[0]);
                 }
@@ -1420,6 +1526,7 @@ export default function App() {
                   }
                   return next;
                 });
+                assignColorsForLabels(parsed);
                 if (parsed.length > 0 && (activeLabel === null || !parsed.includes(activeLabel))) {
                   setActiveLabel(parsed[0]);
                 }
@@ -1504,6 +1611,27 @@ export default function App() {
                   <button onClick={() => { clearHighlight(); updateMaskCount(); }}>Clear Highlight</button>
                   <div style={{ fontSize: 12, color: "var(--muted)" }}>Mask (sampled): {maskCount}</div>
                 </div>
+
+                <div style={{ marginTop: 8 }}>
+                  <label>Paint target (which label's color will be used while drawing):</label>
+                  <select value={paintLabel ?? ""} onChange={(e) => setPaintLabel(e.target.value || null)}>
+                    <option value="">--select--</option>
+                    {labels.map((lab) => (
+                      <option key={lab} value={lab}>
+                        {labelColorNames[lab] ?? lab} ({lab})
+                      </option>
+                    ))}
+                  </select>
+                  <div style={{ display: "flex", gap: 8, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    {labels.map((lab) => (
+                      <div key={lab} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <div style={{ width: 12, height: 12, background: labelColors[lab] ?? "#fff", border: "1px solid #333" }} />
+                        <div style={{ fontSize: 12 }}>{labelColorNames[lab] ?? ""} ({lab})</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
               </div>
             </div>
           </CollapsibleSection>
