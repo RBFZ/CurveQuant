@@ -1403,6 +1403,8 @@ export default function App() {
                       if (hasManual) return null;
                       const px = p.pixelX;
                       const py = dataToPixel({ x: p.xData, y: yval }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
+                      // defensive: skip rendering if projection produced invalid coordinates
+                      if (!isFinite(py) || Number.isNaN(py)) return null;
                       const isActiveLabel = p.id === activeProbeId && idx === labels.indexOf(activeLabel ?? "");
                       // highlight the active label's dot in cyan for the selected probe
                       const color = isActiveLabel ? "#00bcd4" : (labelColors[label] ?? "orange");
@@ -1413,7 +1415,7 @@ export default function App() {
   <Text
                             x={px + probeDotSize + 4}
                             y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
-                            text={`${label}: ${yval.toFixed(4)}`}
+                            text={`${label}: ${yval != null ? yval.toFixed(4) : "—"}`}
                             fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
                             fill="black"
                           />
@@ -1429,6 +1431,8 @@ export default function App() {
                     if (cutoff != null && p.xData > cutoff) return null;
                     const px = p.pixelX;
                     const py = dataToPixel({ x: p.xData, y: m.yData }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
+                    // defensive: skip rendering if projection produced invalid coordinates
+                    if (!isFinite(py) || Number.isNaN(py)) return null;
                     const isActive = p.id === activeProbeId && m.label === activeLabel;
                     return (
                       <React.Fragment key={p.id + "_man_" + m.label}>
@@ -1441,7 +1445,7 @@ export default function App() {
                           <Text
                             x={px + probeDotSize + 4}
                             y={py - Math.max(8, Math.round(probeDotSize * 0.6))}
-                            text={`${m.label}: ${m.yData.toFixed(4)}`}
+                            text={`${m.label}: ${m.yData != null ? m.yData.toFixed(4) : "—"}`}
                             fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
                             fill="black"
                           />
@@ -1801,8 +1805,8 @@ export default function App() {
                     <div key={p.id} className={"probe-row" + (p.id === activeProbeId ? " active" : "")} onClick={() => setActiveProbeId(p.id)}>
                       <strong>{p.id}</strong>
                       <div>Time: {(p.xData * timeMultiplier).toFixed(3)}</div>
-                      <div>Auto: {p.automaticY ? p.automaticY.map((v) => v.toFixed(4)).join(", ") : "—"}</div>
-                      <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData.toFixed(4)}`).join(", ") || "—"}</div>
+                      <div>Auto: {p.automaticY ? p.automaticY.map((v) => (v == null ? "—" : v.toFixed(4))).join(", ") : "—"}</div>
+                      <div>Manual: {p.manual.map((m) => `${m.label}:${m.yData != null ? m.yData.toFixed(4) : "—"}`).join(", ") || "—"}</div>
                       <button onClick={(ev) => { ev.stopPropagation(); setProbes(ps => ps.filter(q => q.id !== p.id)); }}>Remove</button>
                     </div>
                   ))}
