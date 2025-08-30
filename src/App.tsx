@@ -74,6 +74,14 @@ export default function App() {
   const [labelsText, setLabelsText] = useState<string>(labels.join(","));
   const [labelCutoffs, setLabelCutoffs] = useState<Record<string, number | null>>({});
 
+  // View mode: "slow" = existing behavior, "kobs" = K-Obs mode
+  type KDot = { id: string; pixel: Point; kobs: number; dose: number };
+  const [viewMode, setViewMode] = useState<"slow" | "kobs">("slow");
+
+  // K-Obs dots (when viewMode === "kobs")
+  const [kobsDots, setKobsDots] = useState<KDot[]>([]);
+  const [activeKDotId, setActiveKDotId] = useState<string | null>(null);
+
   // label -> hex color and label -> palette name
   const [labelColors, setLabelColors] = useState<Record<string, string>>(() => {
     const out: Record<string, string> = {};
@@ -350,10 +358,16 @@ export default function App() {
     setSelProbeBand(p?.bandPx ?? null);
   }, [activeProbeId, probes]);
 
-  // keyboard handler: press Delete (or Backspace) to remove selected probe or remove a single label value when active
+  // keyboard handler: press Delete (or Backspace) to remove selected probe, kobs dot, or remove a single label value when active
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Delete" || e.key === "Backspace") {
+        // Prioritize K-Obs dot deletion if active
+        if (activeKDotId) {
+          setKobsDots((ds) => ds.filter((d) => d.id !== activeKDotId));
+          setActiveKDotId(null);
+          return;
+        }
         // If a probe and a label are active, remove only that label's value (manual override or automatic)
         if (activeProbeId && activeLabel) {
           setProbes((ps) =>
@@ -382,7 +396,7 @@ export default function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeProbeId, activeLabel, labels]);
+  }, [activeProbeId, activeLabel, labels, activeKDotId]);
 
   // Hidden canvas for pixel sampling
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -454,6 +468,38 @@ export default function App() {
     const pos = transform.point({ x: pointer.x, y: pointer.y });
 
     const pixel = { x: pos.x, y: pos.y };
+
+    // K-Obs click-to-create flow (when in K-Obs view)
+    if (viewMode === "kobs") {
+      // ignore clicks while drawing/highlighting or when placing calibration
+      if (highlightEnabled) return;
+      if (placing) return;
+      if (!calibrated()) {
+        alert("Please calibrate axes first.");
+        return;
+      }
+      try {
+        const data = pixelToData(
+          pixel,
+          { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel },
+          { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value }
+        );
+        const id = uid("kdot_");
+        const dot = { id, pixel, kobs: data.x, dose: data.y };
+        setKobsDots((ds) => {
+          const next = [...ds, dot];
+          next.sort((a, b) => a.kobs - b.kobs || a.id.localeCompare(b.id));
+          return next;
+        });
+        setActiveKDotId(id);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("K-Obs add error:", err);
+        alert("Could not create K-Obs dot.");
+      }
+      return;
+    }
+
     if (placing === "x1") {
       setX1({ pixel, value: x1.value });
       // also set y1 exactly to same pixel as x1 (user requested)
@@ -863,8 +909,47 @@ export default function App() {
     if (p) runDetectionForProbe(p);
   }
 
+  // Dragging K-Obs dots (free x/y)
+  function onDragKDot(e: any, id: string) {
+    const node = e.target;
+    const px = node.x();
+    const py = node.y();
+    setKobsDots((ds) =>
+      ds.map((d) => {
+        if (d.id !== id) return d;
+        let k = d.kobs;
+        let dose = d.dose;
+        try {
+          if (calibrated()) {
+            const data = pixelToData({ x: px, y: py }, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value });
+            k = data.x;
+            dose = data.y;
+          }
+        } catch (err) {}
+        return { ...d, pixel: { x: px, y: py }, kobs: k, dose };
+      })
+    );
+  }
+  function onDragEndKDot(id: string) {
+    // Keep selection on drag end
+    setActiveKDotId(id);
+  }
+
   // Export CSV
   function downloadCSV() {
+    if (viewMode === "kobs") {
+      const rows: (string | number)[][] = [];
+      rows.push(["kobs", "dose"]);
+      const sorted = [...kobsDots].sort((a, b) => a.kobs - b.kobs || a.id.localeCompare(b.id));
+      for (const d of sorted) {
+        rows.push([d.kobs.toFixed(4), d.dose.toFixed(4)]);
+      }
+      const csv = exportCSV(rows);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      saveAs(blob, "kobs-data.csv");
+      return;
+    }
+
     const rows: (string | number)[][] = [];
     const header = ["Time/sec (X)", ...labels.map(String)];
     rows.push(header);
@@ -1014,32 +1099,51 @@ export default function App() {
         <div className="panel" style={{ padding: 8 }}>
           <h3>Data Table</h3>
           <div className="table-preview">
-            <table style={{ width: "100%" }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: "left" }}>Time (s)</th>
-                  {labels.map((l) => <th key={l}>{l}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedProbes.map((p) => (
-                  <tr key={p.id}>
-                    <td>{(p.xData * timeMultiplier).toFixed(3)}</td>
-                    {labels.map((lab, idx) => {
-                      // respect per-label cutoff: hide values when beyond cutoff
-                      const cutoff = labelCutoffs[lab];
-                      if (cutoff != null && p.xData > cutoff) {
-                        return <td key={lab}> </td>;
-                      }
-                      const m = p.manual.find((mm) => mm.label === lab);
-                      if (m) return <td key={lab}>{m.yData.toFixed(4)}</td>;
-                      if (p.automaticY && idx < p.automaticY.length && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(4)}</td>;
-                      return <td key={lab}> </td>;
-                    })}
+            {viewMode === "kobs" ? (
+              <table style={{ width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th>kobs</th>
+                    <th>dose</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {[...kobsDots].sort((a, b) => a.kobs - b.kobs || a.id.localeCompare(b.id)).map((d) => (
+                    <tr key={d.id}>
+                      <td>{d.kobs.toFixed(4)}</td>
+                      <td>{d.dose.toFixed(4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <table style={{ width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left" }}>Time (s)</th>
+                    {labels.map((l) => <th key={l}>{l}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedProbes.map((p) => (
+                    <tr key={p.id}>
+                      <td>{(p.xData * timeMultiplier).toFixed(3)}</td>
+                      {labels.map((lab, idx) => {
+                        // respect per-label cutoff: hide values when beyond cutoff
+                        const cutoff = labelCutoffs[lab];
+                        if (cutoff != null && p.xData > cutoff) {
+                          return <td key={lab}> </td>;
+                        }
+                        const m = p.manual.find((mm) => mm.label === lab);
+                        if (m) return <td key={lab}>{m.yData.toFixed(4)}</td>;
+                        if (p.automaticY && idx < p.automaticY.length && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(4)}</td>;
+                        return <td key={lab}> </td>;
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
 
           <div style={{ marginTop: 8 }}>
@@ -1104,7 +1208,11 @@ export default function App() {
 
       {/* CENTER: toolbar + stage (previously 'left') */}
       <div className="left" style={{ flex: 1 }}>
-        <div className="toolbar">
+      <div className="toolbar">
+          <div style={{ marginBottom: 8 }}>
+            <button onClick={() => setViewMode("slow")} style={{ fontWeight: viewMode === "slow" ? "600" : "400", marginRight: 8 }}>Slow Onset</button>
+            <button onClick={() => setViewMode("kobs")} style={{ fontWeight: viewMode === "kobs" ? "600" : "400" }}>K-Obs</button>
+          </div>
           <div>
             <label>Load Image:</label>
             <input type="file" accept="image/*" onChange={onFile} />
@@ -1455,6 +1563,37 @@ export default function App() {
                   })}
                 </React.Fragment>
               ))}
+              {/* K-Obs dots (when active) */}
+              {kobsDots.map((d) => {
+                const isActive = d.id === activeKDotId;
+                return (
+                  <React.Fragment key={d.id}>
+                    <Circle
+                      x={d.pixel.x}
+                      y={d.pixel.y}
+                      radius={probeDotSize}
+                      fill={isActive ? "green" : "#ff5722"}
+                      opacity={probeDotOpacity}
+                      draggable
+                      onDragMove={(e: any) => { e.cancelBubble = true; onDragKDot(e, d.id); }}
+                      onDragEnd={() => onDragEndKDot(d.id)}
+                      onClick={(e: any) => { e.cancelBubble = true; setActiveKDotId(d.id === activeKDotId ? null : d.id); }}
+                    />
+                    {showProbeText && (
+                      <Text
+                        x={d.pixel.x + probeDotSize + 4}
+                        y={d.pixel.y - Math.max(8, Math.round(probeDotSize * 0.6))}
+                        text={`kobs: ${d.kobs.toFixed(4)}  dose: ${d.dose.toFixed(4)}`}
+                        fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                        fill="black"
+                      />
+                    )}
+                    {isActive && (
+                      <Circle x={d.pixel.x} y={d.pixel.y} radius={Math.max(1, probeDotSize - 1)} stroke="lime" strokeWidth={2} fill="transparent" />
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </Layer>
           </Stage>
         </div>
@@ -1573,6 +1712,57 @@ export default function App() {
           </div>
           </CollapsibleSection>
 
+          {/* K-Obs UI (visible in right panel when viewMode === 'kobs') */}
+          {viewMode === "kobs" ? (
+            <CollapsibleSection title="K-Obs" defaultOpen={true}>
+              <div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <button onClick={() => { setKobsDots([]); setActiveKDotId(null); }}>Clear dots</button>
+                  <button onClick={() => {
+                    if (!calibrated()) { alert("Please calibrate axes first."); return; }
+                    // add a center dot
+                    try {
+                      const centerPixel = dataToPixel(
+                        { x: (x1.value! + x2.value!) / 2, y: (y1.value! + y2.value!) / 2 },
+                        { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! },
+                        { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }
+                      );
+                      const data = pixelToData(centerPixel, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value });
+                      const id = uid("kdot_");
+                      const dot = { id, pixel: centerPixel, kobs: data.x, dose: data.y };
+                      setKobsDots((ds) => {
+                        const next = [...ds, dot];
+                        next.sort((a, b) => a.kobs - b.kobs || a.id.localeCompare(b.id));
+                        return next;
+                      });
+                    } catch (err) {
+                      // eslint-disable-next-line no-console
+                      console.error(err);
+                      alert("Could not add center dot.");
+                    }
+                  }}>Add center dot</button>
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <small>Click on the image to add dots. Select a dot and press Delete to remove it. Drag to move.</small>
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <strong>Dots</strong>
+                  <div style={{ marginTop: 6, maxHeight: 160, overflow: "auto" }}>
+                    {kobsDots.map((d) => (
+                      <div key={d.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", padding: "4px 0" }}>
+                        <div style={{ fontSize: 12 }}>{d.kobs.toFixed(4)} , {d.dose.toFixed(4)}</div>
+                        <div>
+                          <button onClick={(e) => { e.stopPropagation(); setActiveKDotId(d.id); }}>Select</button>
+                          <button style={{ marginLeft: 6 }} onClick={(e) => { e.stopPropagation(); setKobsDots(ds => ds.filter(x => x.id !== d.id)); if (activeKDotId === d.id) setActiveKDotId(null); }}>Remove</button>
+                        </div>
+                      </div>
+                    ))}
+                    {kobsDots.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>No dots</div>}
+                  </div>
+                </div>
+              </div>
+            </CollapsibleSection>
+          ) : null}
           <CollapsibleSection title="Highlighter Settings" defaultOpen={false}>
             <div>
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
