@@ -78,6 +78,9 @@ export default function App() {
   const [csvHeaderTime, setCsvHeaderTime] = useState<string>("Time/sec (X)");
   const [csvHeaderProduct, setCsvHeaderProduct] = useState<string>("Product");
   const [csvHeaderConc, setCsvHeaderConc] = useState<string>("Conc");
+  // CSV header editable names for K-Obs table
+  const [csvHeaderKobs1, setCsvHeaderKobs1] = useState<string>("kobs");
+  const [csvHeaderKobs2, setCsvHeaderKobs2] = useState<string>("dose");
 
   // View mode: "slow" = existing behavior, "kobs" = K-Obs mode
   type KDot = { id: string; pixel: Point; kobs: number; dose: number };
@@ -944,7 +947,7 @@ export default function App() {
   function downloadCSV() {
     if (viewMode === "kobs") {
       const rows: (string | number)[][] = [];
-      rows.push(["kobs", "dose"]);
+      rows.push([csvHeaderKobs1, csvHeaderKobs2]);
       const sorted = [...kobsDots].sort((a, b) => a.kobs - b.kobs || a.id.localeCompare(b.id));
       for (const d of sorted) {
         rows.push([d.kobs.toFixed(4), d.dose.toFixed(4)]);
@@ -1164,14 +1167,30 @@ export default function App() {
               />
             </div>
           )}
+          {viewMode === "kobs" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+              <input
+                value={csvHeaderKobs1}
+                onChange={(e) => setCsvHeaderKobs1(e.target.value)}
+                style={{ width: "50%" }}
+                placeholder="K-Obs column 1"
+              />
+              <input
+                value={csvHeaderKobs2}
+                onChange={(e) => setCsvHeaderKobs2(e.target.value)}
+                style={{ width: "50%" }}
+                placeholder="K-Obs column 2"
+              />
+            </div>
+          )}
 
           <div className="table-preview">
             {viewMode === "kobs" ? (
               <table style={{ width: "100%" }}>
                 <thead>
                   <tr>
-                    <th>kobs</th>
-                    <th>dose</th>
+                    <th>{csvHeaderKobs1}</th>
+                    <th>{csvHeaderKobs2}</th>
                   </tr>
                 </thead>
                 <tbody>
