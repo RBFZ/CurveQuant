@@ -1,5 +1,5 @@
 # Graph Analyzer
-
+RBFZ
 A small local web tool to digitize slow-onset curve graphs (similar to WebPlotDigitizer) with these features:
 - Load an image of your plotted curves.
 - Calibrate axes by placing x1/x2 (horizontal) and y1/y2 (vertical) points with snapping rules.
