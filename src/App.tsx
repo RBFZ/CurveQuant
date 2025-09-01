@@ -176,8 +176,8 @@ export default function App() {
   const [highlightMode, setHighlightMode] = useState<"pen" | "eraser">("pen");
 
   // probe dot size and whether to show the text label next to the dot
-  const [probeDotSize, setProbeDotSize] = useState<number>(8);
-  const [showProbeText, setShowProbeText] = useState<boolean>(true);
+  const [probeDotSize, setProbeDotSize] = useState<number>(2);
+  const [showProbeText, setShowProbeText] = useState<boolean>(false);
   // display settings: toggle probe vertical lines (dashed) and global dot opacity (0..1)
   const [showProbeLines, setShowProbeLines] = useState<boolean>(true);
   const [probeDotOpacity, setProbeDotOpacity] = useState<number>(1);
