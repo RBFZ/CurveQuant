@@ -74,6 +74,11 @@ export default function App() {
   const [labelsText, setLabelsText] = useState<string>(labels.join(","));
   const [labelCutoffs, setLabelCutoffs] = useState<Record<string, number | null>>({});
 
+  // CSV header editable names for Slow Onset long-format export/table
+  const [csvHeaderTime, setCsvHeaderTime] = useState<string>("Time/sec (X)");
+  const [csvHeaderProduct, setCsvHeaderProduct] = useState<string>("Product");
+  const [csvHeaderConc, setCsvHeaderConc] = useState<string>("Conc");
+
   // View mode: "slow" = existing behavior, "kobs" = K-Obs mode
   type KDot = { id: string; pixel: Point; kobs: number; dose: number };
   const [viewMode, setViewMode] = useState<"slow" | "kobs">("slow");
@@ -950,35 +955,42 @@ export default function App() {
       return;
     }
 
+    // Slow Onset: long format, one row per (probe time, label) but grouped by concentration (label first)
     const rows: (string | number)[][] = [];
-    const header = ["Time/sec (X)", ...labels.map(String)];
-    rows.push(header);
-    // each probe is a row
-    for (const p of sortedProbes) {
-      const row: (string | number)[] = [];
-      // export the visual time (respecting timeMultiplier) formatted to 2 decimals
-      row.push((p.xData * timeMultiplier).toFixed(2));
-      for (const label of header.slice(1)) {
-        // respect per-label cutoff: if cutoff exists and probe.xData is beyond it, export blank
-        const cutoff = labelCutoffs[label];
-        if (cutoff != null && p.xData > cutoff) {
-          row.push("");
-          continue;
+    // Use edited header names
+    rows.push([csvHeaderTime, csvHeaderProduct, csvHeaderConc]);
+
+    // probes sorted ascending (we will iterate labels outer, probes inner)
+    const sorted = [...sortedProbes].sort((a, b) => a.xData - b.xData || a.id.localeCompare(b.id));
+    for (let idx = 0; idx < labels.length; idx++) {
+      const label = labels[idx];
+      const cutoff = labelCutoffs[label];
+      for (const p of sorted) {
+        // respect per-label cutoff: if cutoff exists and probe.xData is beyond it, export blank product
+        let productVal: string | number = "";
+        if (!(cutoff != null && p.xData > cutoff)) {
+          const m = p.manual.find((mm) => mm.label === label);
+          if (m && m.yData != null) {
+            productVal = Number(m.yData).toFixed(4);
+          } else if (p.automaticY && idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) {
+            productVal = Number(p.automaticY[idx]).toFixed(4);
+          } else {
+            productVal = "";
+          }
+        } else {
+          productVal = "";
         }
-        // check manual override
-        const m = p.manual.find((mm) => mm.label === label);
-        if (m) {
-          // manual values: format to 4 decimal places
-          row.push(m.yData.toFixed(4));
-        } else if (p.automaticY) {
-          // match by index: labels list is typed-order; detection results are top->bottom
-          const idx = labels.indexOf(label);
-          if (idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) row.push(p.automaticY[idx].toFixed(4));
-          else row.push("");
-        } else row.push("");
+        // Conc column is the label; no decimal unless non-integer
+        let concVal: string = label;
+        const ln = Number(label);
+        if (!isNaN(ln)) {
+          concVal = Number.isInteger(ln) ? String(ln) : String(ln);
+        }
+        const timeVal = (p.xData * timeMultiplier).toFixed(3);
+        rows.push([timeVal, productVal, concVal]);
       }
-      rows.push(row);
     }
+
     const csv = exportCSV(rows);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     saveAs(blob, "graph-data.csv");
@@ -1073,6 +1085,37 @@ export default function App() {
     return p.x;
   }
 
+  // helper to render long-format table rows (one row per probe,label)
+  function renderLongRows() {
+    const out: any[] = [];
+    const sorted = [...sortedProbes].sort((a, b) => a.xData - b.xData || a.id.localeCompare(b.id));
+    for (let idx = 0; idx < labels.length; idx++) {
+      const lab = labels[idx];
+      const cutoff = labelCutoffs[lab];
+      for (const p of sorted) {
+        let productCell = "";
+        if (!(cutoff != null && p.xData > cutoff)) {
+          const m = p.manual.find((mm) => mm.label === lab);
+          if (m && m.yData != null) productCell = m.yData.toFixed(4);
+          else if (p.automaticY && idx >= 0 && idx < p.automaticY.length && p.automaticY[idx] !== undefined) productCell = p.automaticY[idx].toFixed(4);
+        }
+        // conc formatting: no decimal unless non-integer
+        let conc = lab;
+        const ln = Number(lab);
+        if (!isNaN(ln)) conc = Number.isInteger(ln) ? String(ln) : String(ln);
+        const timeStr = (p.xData * timeMultiplier).toFixed(3);
+        out.push(
+          <tr key={`${lab}_${p.id}`}>
+            <td>{timeStr}</td>
+            <td>{productCell}</td>
+            <td>{conc}</td>
+          </tr>
+        );
+      }
+    }
+    return out;
+  }
+
   // When labels change (Apply labels), create/refresh label color mappings
   // Ensure each label receives a unique color from the palette (do not merge with previous mappings)
   function assignColorsForLabels(parsed: string[]) {
@@ -1098,6 +1141,30 @@ export default function App() {
       <div className="left-data" style={{ width: leftWidth, minWidth: 220, maxWidth: 700, overflow: "auto" }}>
         <div className="panel" style={{ padding: 8 }}>
           <h3>Data Table</h3>
+          {/* Header inputs only relevant for Slow Onset */}
+          {viewMode === "slow" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+              <input
+                value={csvHeaderTime}
+                onChange={(e) => setCsvHeaderTime(e.target.value)}
+                style={{ width: "40%" }}
+                placeholder="Time header"
+              />
+              <input
+                value={csvHeaderProduct}
+                onChange={(e) => setCsvHeaderProduct(e.target.value)}
+                style={{ width: "30%" }}
+                placeholder="Product header"
+              />
+              <input
+                value={csvHeaderConc}
+                onChange={(e) => setCsvHeaderConc(e.target.value)}
+                style={{ width: "30%" }}
+                placeholder="Conc header"
+              />
+            </div>
+          )}
+
           <div className="table-preview">
             {viewMode === "kobs" ? (
               <table style={{ width: "100%" }}>
@@ -1120,27 +1187,13 @@ export default function App() {
               <table style={{ width: "100%" }}>
                 <thead>
                   <tr>
-                    <th style={{ textAlign: "left" }}>Time (s)</th>
-                    {labels.map((l) => <th key={l}>{l}</th>)}
+                    <th style={{ textAlign: "left" }}>{csvHeaderTime}</th>
+                    <th>{csvHeaderProduct}</th>
+                    <th>{csvHeaderConc}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedProbes.map((p) => (
-                    <tr key={p.id}>
-                      <td>{(p.xData * timeMultiplier).toFixed(3)}</td>
-                      {labels.map((lab, idx) => {
-                        // respect per-label cutoff: hide values when beyond cutoff
-                        const cutoff = labelCutoffs[lab];
-                        if (cutoff != null && p.xData > cutoff) {
-                          return <td key={lab}> </td>;
-                        }
-                        const m = p.manual.find((mm) => mm.label === lab);
-                        if (m) return <td key={lab}>{m.yData.toFixed(4)}</td>;
-                        if (p.automaticY && idx < p.automaticY.length && p.automaticY[idx] !== undefined) return <td key={lab}>{p.automaticY[idx].toFixed(4)}</td>;
-                        return <td key={lab}> </td>;
-                      })}
-                    </tr>
-                  ))}
+                  {renderLongRows()}
                 </tbody>
               </table>
             )}
@@ -1168,6 +1221,11 @@ export default function App() {
               <button onClick={() => applyManualTextarea()}>Add</button>
             </div>
             <small>Values correspond to labels shown above (top → bottom).</small>
+          </div>
+
+          {/* Export CSV button moved into left panel under the left table */}
+          <div style={{ marginTop: 8 }}>
+            <button onClick={() => downloadCSV()}>Export CSV</button>
           </div>
         </div>
       </div>
@@ -2076,9 +2134,7 @@ export default function App() {
             </table>
           </div>
 
-          <div style={{ marginTop: 12 }}>
-            <button onClick={() => downloadCSV()}>Export CSV</button>
-          </div>
+          {/* Right-panel Export CSV button removed (Export is now in left panel under table) */}
 
         </div>
       </div>
