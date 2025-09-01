@@ -1062,7 +1062,7 @@ export default function App() {
     c.forEach((pt, i) => {
       if (!pt.pixel) return;
       items.push(
-        <Circle key={keys[i]} x={pt.pixel.x} y={pt.pixel.y} radius={6} fill={i < 2 ? "red" : "blue"} stroke="white" strokeWidth={2} />
+        <Circle key={keys[i]} x={pt.pixel.x} y={pt.pixel.y} radius={3} fill={i < 2 ? "red" : "blue"} stroke="white" strokeWidth={2} />
       );
     });
     // draw lines between x1-x2 and y1-y2
