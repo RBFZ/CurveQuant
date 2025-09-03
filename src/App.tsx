@@ -22,6 +22,14 @@ type Probe = {
   bandPx?: number | null;
 };
 
+type HighlighterLine = {
+  id: string;
+  label: string;
+  colorHex: string;
+  points: Point[]; // pixel-space points, length >= 2. endpoints + optional control points
+  visible?: boolean;
+};
+
 function uid(prefix = "") {
   return prefix + Math.random().toString(36).slice(2, 9);
 }
@@ -166,7 +174,7 @@ export default function App() {
   // mask canvas & highlighter state for freehand selection
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   // keep strokes painted directly to the mask canvas so disconnected areas are supported
-  // each stroke: { points: Point[], label: string }
+  // each stroke: { points: Point[]; label: string }
   const highlightPathsRef = useRef<{ x: number; y: number }[][]>([]);
   const highlightStrokesMetaRef = useRef<{ points: Point[]; label: string }[]>([]);
   const drawingRef = useRef<boolean>(false);
@@ -190,6 +198,14 @@ export default function App() {
 
   // mask stats (for visible debug indicator)
   const [maskCount, setMaskCount] = useState<number>(0);
+
+  // Highlighter Lines state (new)
+  const [highlighterLines, setHighlighterLines] = useState<HighlighterLine[]>([]);
+  const [lineDrawMode, setLineDrawMode] = useState<boolean>(false); // when true, stage pointer draws a new line
+  const [lineDrawLabel, setLineDrawLabel] = useState<string | null>(labels[0] || null);
+  const lineDrawingRef = useRef<boolean>(false);
+  const [linePreview, setLinePreview] = useState<Point[] | null>(null);
+  const [activeLineId, setActiveLineId] = useState<string | null>(null); // selected line in UI
 
   function updateMaskCount() {
     const c = maskCanvasRef.current;
@@ -312,6 +328,16 @@ export default function App() {
   }
 
   function handlePointerDown(e: any) {
+    // line drawing mode has priority when enabled and highlight is not active
+    if (lineDrawMode && !highlightEnabled) {
+      if (!imgRef.current) return;
+      const pos = getPointerImagePos(e);
+      if (!pos) return;
+      lineDrawingRef.current = true;
+      setLinePreview([pos]);
+      return;
+    }
+
     if (!highlightEnabled) return;
     if (!imgRef.current) return;
     ensureMaskCanvas();
@@ -328,6 +354,20 @@ export default function App() {
   }
 
   function handlePointerMove(e: any) {
+    // drawing new line preview
+    if (lineDrawMode && lineDrawingRef.current) {
+      const pos = getPointerImagePos(e);
+      if (!pos) return;
+      setLinePreview((prev) => {
+        if (!prev) return [pos];
+        if (prev.length === 1) return [prev[0], pos];
+        const copy = prev.slice();
+        copy[copy.length - 1] = pos;
+        return copy;
+      });
+      return;
+    }
+
     if (!highlightEnabled) return;
     if (!drawingRef.current) return;
     const pos = getPointerImagePos(e);
@@ -345,6 +385,26 @@ export default function App() {
   }
 
   function handlePointerUp(e: any) {
+    // finalize line drawing
+    if (lineDrawMode && lineDrawingRef.current) {
+      lineDrawingRef.current = false;
+      const preview = linePreview;
+      setLinePreview(null);
+      if (!preview || preview.length < 2) return;
+      // create new line with endpoints preview[0] and preview[1]
+      const label = lineDrawLabel ?? (labels[0] ?? "");
+      const color = labelColors[label] ?? PALETTE[0].hex;
+      const newLine: HighlighterLine = { id: uid("line_"), label, colorHex: color, points: [preview[0], preview[1]], visible: true };
+      setHighlighterLines((s) => [...s, newLine]);
+      // schedule detection update for all probes (safe fallback)
+      setTimeout(() => {
+        probes.forEach((p) => scheduleRunDetectionForProbe(p.id));
+      }, 50);
+      // leave draw mode off automatically
+      setLineDrawMode(false);
+      return;
+    }
+
     if (!highlightEnabled) return;
     if (!drawingRef.current) return;
     drawingRef.current = false;
@@ -593,7 +653,7 @@ export default function App() {
     setTimeout(() => runDetectionForProbe(p), 50);
   }
 
-  // Run detection for a probe: modified to respect per-label colored mask
+  // Run detection for a probe: modified to respect per-label colored mask and line overrides
   function runDetectionForProbe(probe: Probe) {
     if (!imgRef.current || !calibrated()) return;
     const imgEl = imgRef.current;
@@ -607,6 +667,84 @@ export default function App() {
     const h = canvas.height;
     // per-probe or global band (px)
     const band = Math.max(0, Math.round(probe.bandPx ?? bandPx));
+
+    // First: build a per-label override from highlighterLines (if a line exists for that label).
+    // We'll attempt to compute the y pixel for the probe's x (px) along the polyline and convert to data.
+    const lineYsData: (number | undefined)[] = new Array(labels.length).fill(undefined);
+    try {
+      if (highlighterLines && highlighterLines.length > 0) {
+        function yOnLineForPx(line: HighlighterLine, targetPx: number): number | null {
+          if (!line.points || line.points.length < 2) return null;
+          // Try to find a segment where targetPx lies between segment x endpoints (interpolate).
+          for (let i = 0; i < line.points.length - 1; i++) {
+            const a = line.points[i];
+            const b = line.points[i + 1];
+            const x1s = a.x;
+            const x2s = b.x;
+            if (Math.abs(x2s - x1s) < 1e-6) {
+              // vertical segment: if targetPx nearly matches, return interpolation by y
+              if (Math.abs(targetPx - x1s) < 1) {
+                const t = 0.5;
+                return a.y * (1 - t) + b.y * t;
+              }
+              continue;
+            }
+            // check if px lies within [min(x1,x2), max(x1,x2)]
+            const minx = Math.min(x1s, x2s);
+            const maxx = Math.max(x1s, x2s);
+            if (targetPx >= minx - 0.5 && targetPx <= maxx + 0.5) {
+              const t = (targetPx - x1s) / (x2s - x1s);
+              const y = a.y + t * (b.y - a.y);
+              return y;
+            }
+          }
+          // if no segment matched, fallback to nearest endpoint's y
+          let bestIdx = 0;
+          let bestDist = Math.abs(line.points[0].x - targetPx);
+          for (let i = 1; i < line.points.length; i++) {
+            const d = Math.abs(line.points[i].x - targetPx);
+            if (d < bestDist) {
+              bestDist = d;
+              bestIdx = i;
+            }
+          }
+          return line.points[bestIdx].y;
+        }
+
+        for (let li = 0; li < labels.length; li++) {
+          const lab = labels[li];
+          // find the most relevant line for this label. If multiple exist, pick the one with smallest horizontal distance to px.
+          const candidateLines = highlighterLines.filter((L) => L.label === lab && L.visible !== false);
+          if (candidateLines.length === 0) continue;
+          let bestY: number | null = null;
+          let bestDx = Infinity;
+          for (const L of candidateLines) {
+            const yPx = yOnLineForPx(L, px);
+            if (yPx == null) continue;
+            // compute dx to polyline bounding box
+            const xs = L.points.map((p) => p.x);
+            const minx = Math.min(...xs);
+            const maxx = Math.max(...xs);
+            const dx = Math.max(0, Math.max(minx - px, px - maxx));
+            if (dx < bestDx) {
+              bestDx = dx;
+              bestY = yPx;
+            }
+          }
+          if (bestY != null) {
+            try {
+              const dataY = pixelToData({ x: px, y: bestY }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
+              lineYsData[li] = dataY;
+            } catch (err) {
+              // ignore conversion errors and leave undefined
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // errors computing line overrides should not crash detection; fall back to mask/derivative logic
+    }
+
     // determine vertical sampling range between calibrated y1 and y2
     const startY = Math.max(0, Math.floor(Math.min(y1.pixel!.y, y2.pixel!.y)));
     const endY = Math.min(h - 1, Math.ceil(Math.max(y1.pixel!.y, y2.pixel!.y)));
@@ -720,6 +858,19 @@ export default function App() {
     // - If a mask (valid) exists for the label, prefer rows inside that mask as a final fallback.
     // - Choose a median/nearest valid row to ensure a dot is produced even when diff/profile is unhelpful.
     function pickForLabel(labelIdx: number): number {
+      // If we already have a line-derived y for this label, convert it to seg-space and return that index.
+      const lineDataY = lineYsData[labelIdx];
+      if (lineDataY !== undefined) {
+        // compute pixel y from data Y (use probe px and dataToPixel)
+        try {
+          const py = dataToPixel({ x: probe.xData, y: lineDataY }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
+          const segY = Math.round(py) - startY;
+          if (segY >= 0 && segY < segH) return segY;
+        } catch (err) {
+          // fall through to normal logic
+        }
+      }
+
       const lab = labels[labelIdx];
       const valid = labelValidRows[lab] ?? null; // if null => no mask for this label
       // find local maxima above threshold and respecting valid when present
@@ -811,6 +962,13 @@ export default function App() {
       return pixelToData({ x: px, y: py }, { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! }, { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }).y;
     });
 
+    // If any lineYsData entries exist, override those labels in ysData (they have priority)
+    for (let idx = 0; idx < labels.length; idx++) {
+      if (lineYsData[idx] !== undefined) {
+        ysData[idx] = lineYsData[idx] as number;
+      }
+    }
+
     // store
     setDetectionResults((s) => ({ ...s, [probe.id]: ysData }));
     // update probe automaticY
@@ -871,6 +1029,8 @@ export default function App() {
     setManualMode(false);
     setLockImage(false);
     clearHighlight();
+    // clear highlighter lines
+    setHighlighterLines([]);
   }
 
   // remove all probes (keeps other state)
@@ -1136,6 +1296,125 @@ export default function App() {
     // ensure paintLabel and activeLabel are valid for the new label set
     if (!paintLabel || (parsed.length > 0 && !parsed.includes(paintLabel))) setPaintLabel(parsed.length > 0 ? parsed[0] : null);
     if (!activeLabel || (parsed.length > 0 && !parsed.includes(activeLabel))) setActiveLabel(parsed.length > 0 ? parsed[0] : null);
+  }
+
+  // Helpers for Highlighter Lines UI & interactions
+  function deleteLine(id: string) {
+    setHighlighterLines((ls) => ls.filter((l) => l.id !== id));
+    setActiveLineId((cur) => (cur === id ? null : cur));
+    // re-run detection for all probes
+    setTimeout(() => {
+      probes.forEach((p) => scheduleRunDetectionForProbe(p.id));
+    }, 50);
+  }
+
+  function updateLinePoint(lineId: string, pointIndex: number, pos: Point) {
+    setHighlighterLines((ls) =>
+      ls.map((l) => {
+        if (l.id !== lineId) return l;
+        const copy = { ...l, points: l.points.map((pt, i) => (i === pointIndex ? pos : pt)) };
+        return copy;
+      })
+    );
+    // schedule detections for affected probes (simple: schedule all)
+    setTimeout(() => {
+      probes.forEach((p) => scheduleRunDetectionForProbe(p.id));
+    }, 20);
+  }
+
+  function insertControlPoint(lineId: string, pos: Point) {
+    setHighlighterLines((ls) =>
+      ls.map((l) => {
+        if (l.id !== lineId) return l;
+        // choose insertion index: find nearest segment by horizontal distance to pos.x and insert between i and i+1
+        let bestIdx = 0;
+        let bestDist = Infinity;
+        for (let i = 0; i < l.points.length - 1; i++) {
+          const a = l.points[i];
+          const b = l.points[i + 1];
+          // compute perpendicular distance to segment (approx)
+          const segMidX = (a.x + b.x) / 2;
+          const dx = Math.abs(segMidX - pos.x);
+          if (dx < bestDist) {
+            bestDist = dx;
+            bestIdx = i + 1;
+          }
+        }
+        const newPts = l.points.slice();
+        newPts.splice(bestIdx, 0, pos);
+        return { ...l, points: newPts };
+      })
+    );
+    setTimeout(() => {
+      probes.forEach((p) => scheduleRunDetectionForProbe(p.id));
+    }, 20);
+  }
+
+  // Render helpers for highlighter lines - returns Konva elements
+  function renderHighlighterLines() {
+    if (!highlighterLines || highlighterLines.length === 0) return null;
+    const items: any[] = [];
+    for (const line of highlighterLines) {
+      if (line.visible === false) continue;
+      // flatten points array for Konva.Line
+      const pts = line.points.flatMap((p) => [p.x, p.y]);
+      items.push(
+        <Line
+          key={line.id}
+          points={pts}
+          stroke={line.colorHex}
+          strokeWidth={1}
+          tension={line.points.length >= 3 ? 0.5 : 0}
+          lineCap="round"
+          lineJoin="round"
+          hitStrokeWidth={10}
+          onClick={(e: any) => {
+            e.cancelBubble = true;
+            // insert control point on click (bend)
+            const p = getPointerImagePos(e);
+            if (!p) return;
+            insertControlPoint(line.id, p);
+            setActiveLineId(line.id);
+          }}
+        />
+      );
+      // render draggable circles for each point (endpoints + control points)
+      line.points.forEach((pt, idx) => {
+        items.push(
+          <Circle
+            key={line.id + "_pt_" + idx}
+            x={pt.x}
+            y={pt.y}
+            radius={Math.max(1, probeDotSize)}
+            fill={line.colorHex}
+            stroke={activeLineId === line.id ? "lime" : undefined}
+            strokeWidth={activeLineId === line.id ? 2 : 0}
+            draggable
+            onDragMove={(e: any) => {
+              e.cancelBubble = true;
+              const pos = { x: e.target.x(), y: e.target.y() };
+              updateLinePoint(line.id, idx, pos);
+            }}
+            onClick={(e: any) => {
+              e.cancelBubble = true;
+              setActiveLineId(line.id);
+            }}
+          />
+        );
+      });
+    }
+    // render line preview if drawing
+    if (linePreview && linePreview.length >= 2) {
+      const pts = linePreview.flatMap((p) => [p.x, p.y]);
+      items.push(<Line key="__line_preview" points={pts} stroke={"#000"} strokeWidth={1} dash={[4, 4]} />);
+      items.push(
+        <Circle key="__line_preview_a" x={linePreview[0].x} y={linePreview[0].y} radius={Math.max(1, probeDotSize)} fill={"#000"} />
+      );
+      items.push(
+        <Circle key="__line_preview_b" x={linePreview[linePreview.length - 1].x} y={linePreview[linePreview.length - 1].y} radius={Math.max(1, probeDotSize)} fill={"#000"} />
+      );
+    }
+    return items;
   }
 
   return (
@@ -1503,6 +1782,9 @@ export default function App() {
                   opacity={0.55}
                 />
               )}
+
+              {/* Highlighter Lines rendering */}
+              {renderHighlighterLines()}
 
               {/* calibration markers */}
               {renderCalibrationMarkers()}
@@ -1903,6 +2185,44 @@ export default function App() {
                   </div>
                 </div>
 
+              </div>
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection title="Highlighter Lines" defaultOpen={false}>
+            <div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  Label:
+                  <select value={lineDrawLabel ?? ""} onChange={(e) => setLineDrawLabel(e.target.value || null)}>
+                    {labels.map((l) => <option key={l} value={l}>{l}</option>)}
+                  </select>
+                </label>
+                <button onClick={() => {
+                  setLineDrawMode((v) => !v);
+                  // clear preview if toggling off
+                  if (lineDrawMode) setLinePreview(null);
+                }}>{lineDrawMode ? "Cancel draw" : "Draw line"}</button>
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <small>Click and drag on the image to draw a straight line. Endpoints are draggable. Click a line to add a control point and drag it to bend the line.</small>
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <strong>Lines</strong>
+                <div style={{ marginTop: 6 }}>
+                  {highlighterLines.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>No lines</div>}
+                  {highlighterLines.map((L) => (
+                    <div key={L.id} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                      <div style={{ width: 12, height: 12, background: L.colorHex, border: "1px solid #333" }} />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13 }}>{L.label}</div>
+                        <div style={{ fontSize: 11, color: "var(--muted)" }}>{L.points.length} pts</div>
+                      </div>
+                      <button onClick={() => { setActiveLineId(L.id); }}>Select</button>
+                      <button onClick={() => deleteLine(L.id)}>Delete</button>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </CollapsibleSection>
