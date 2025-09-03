@@ -1390,10 +1390,34 @@ export default function App() {
             stroke={activeLineId === line.id ? "lime" : undefined}
             strokeWidth={activeLineId === line.id ? 2 : 0}
             draggable
+            onDragStart={(e: any) => {
+              // stop Konva from interpreting this drag as a stage drag
+              e.cancelBubble = true;
+              try {
+                const st = stageRef.current;
+                if (st && typeof st.draggable === "function") {
+                  // temporarily disable stage dragging while a handle is being dragged
+                  st.draggable(false);
+                }
+              } catch (err) {}
+            }}
             onDragMove={(e: any) => {
               e.cancelBubble = true;
               const pos = { x: e.target.x(), y: e.target.y() };
               updateLinePoint(line.id, idx, pos);
+            }}
+            onDragEnd={(e: any) => {
+              // ensure dragend does not bubble and persist final point position
+              e.cancelBubble = true;
+              const pos = { x: e.target.x(), y: e.target.y() };
+              updateLinePoint(line.id, idx, pos);
+              try {
+                const st = stageRef.current;
+                if (st && typeof st.draggable === "function") {
+                  // restore stage draggable based on lockImage state
+                  st.draggable(!lockImage);
+                }
+              } catch (err) {}
             }}
             onClick={(e: any) => {
               e.cancelBubble = true;
