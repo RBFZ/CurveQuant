@@ -3,6 +3,7 @@ import { Stage, Layer, Image as KImage, Line, Circle, Text } from "react-konva";
 import useImage from "use-image";
 import { saveAs } from "file-saver";
 import { pixelToData, dataToPixel, exportCSV } from "./utils";
+import { computeLinearFit } from "./math/linreg";
 import CollapsibleSection from "./CollapsibleSection";
 
 type Point = { x: number; y: number };
@@ -89,14 +90,22 @@ export default function App() {
   // CSV header editable names for K-Obs table
   const [csvHeaderKobs1, setCsvHeaderKobs1] = useState<string>("kobs");
   const [csvHeaderKobs2, setCsvHeaderKobs2] = useState<string>("dose");
+  // CSV header editable names for LFER table
+  const [csvHeaderLFER1, setCsvHeaderLFER1] = useState<string>("log_km/kcat");
+  const [csvHeaderLFER2, setCsvHeaderLFER2] = useState<string>("log_ki");
 
-  // View mode: "slow" = existing behavior, "kobs" = K-Obs mode
+  // View mode: "slow" = existing behavior, "kobs" = K-Obs mode, "lfer" = LFER mode
   type KDot = { id: string; pixel: Point; kobs: number; dose: number };
-  const [viewMode, setViewMode] = useState<"slow" | "kobs">("slow");
+  type LFERDot = { id: string; pixel: Point; log_km_kcat: number; log_ki: number; r2?: number };
+  const [viewMode, setViewMode] = useState<"slow" | "kobs" | "lfer">("slow");
 
   // K-Obs dots (when viewMode === "kobs")
   const [kobsDots, setKobsDots] = useState<KDot[]>([]);
   const [activeKDotId, setActiveKDotId] = useState<string | null>(null);
+
+  // LFER dots (when viewMode === "lfer")
+  const [lferDots, setLferDots] = useState<LFERDot[]>([]);
+  const [activeLFERDotId, setActiveLFERDotId] = useState<string | null>(null);
 
   // label -> hex color and label -> palette name
   const [labelColors, setLabelColors] = useState<Record<string, string>>(() => {
@@ -426,10 +435,16 @@ export default function App() {
     setSelProbeBand(p?.bandPx ?? null);
   }, [activeProbeId, probes]);
 
-  // keyboard handler: press Delete (or Backspace) to remove selected probe, kobs dot, or remove a single label value when active
+  // keyboard handler: press Delete (or Backspace) to remove selected probe, kobs dot, lfer dot, or remove a single label value when active
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Delete" || e.key === "Backspace") {
+        // Prioritize LFER dot deletion if active
+        if (activeLFERDotId) {
+          setLferDots((ds) => ds.filter((d) => d.id !== activeLFERDotId));
+          setActiveLFERDotId(null);
+          return;
+        }
         // Prioritize K-Obs dot deletion if active
         if (activeKDotId) {
           setKobsDots((ds) => ds.filter((d) => d.id !== activeKDotId));
@@ -464,7 +479,7 @@ export default function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeProbeId, activeLabel, labels, activeKDotId]);
+  }, [activeProbeId, activeLabel, labels, activeKDotId, activeLFERDotId]);
 
   // Hidden canvas for pixel sampling
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -564,6 +579,37 @@ export default function App() {
         // eslint-disable-next-line no-console
         console.error("K-Obs add error:", err);
         alert("Could not create K-Obs dot.");
+      }
+      return;
+    }
+
+    // LFER click-to-create flow (when in LFER view)
+    if (viewMode === "lfer") {
+      // ignore clicks while drawing/highlighting or when placing calibration
+      if (highlightEnabled) return;
+      if (placing) return;
+      if (!calibrated()) {
+        alert("Please calibrate axes first.");
+        return;
+      }
+      try {
+        const data = pixelToData(
+          pixel,
+          { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel },
+          { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value }
+        );
+        const id = uid("lfer_");
+        const dot = { id, pixel, log_km_kcat: data.x, log_ki: data.y };
+        setLferDots((ds) => {
+          const next = [...ds, dot];
+          next.sort((a, b) => a.log_km_kcat - b.log_km_kcat || a.id.localeCompare(b.id));
+          return next;
+        });
+        setActiveLFERDotId(id);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("LFER add error:", err);
+        alert("Could not create LFER dot.");
       }
       return;
     }
@@ -1103,6 +1149,32 @@ export default function App() {
     setActiveKDotId(id);
   }
 
+  // Dragging LFER dots (free x/y)
+  function onDragLFERDot(e: any, id: string) {
+    const node = e.target;
+    const px = node.x();
+    const py = node.y();
+    setLferDots((ds) =>
+      ds.map((d) => {
+        if (d.id !== id) return d;
+        let log_km_kcat = d.log_km_kcat;
+        let log_ki = d.log_ki;
+        try {
+          if (calibrated()) {
+            const data = pixelToData({ x: px, y: py }, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value });
+            log_km_kcat = data.x;
+            log_ki = data.y;
+          }
+        } catch (err) {}
+        return { ...d, pixel: { x: px, y: py }, log_km_kcat, log_ki };
+      })
+    );
+  }
+  function onDragEndLFERDot(id: string) {
+    // Keep selection on drag end
+    setActiveLFERDotId(id);
+  }
+
   // Export CSV
   function downloadCSV() {
     if (viewMode === "kobs") {
@@ -1115,6 +1187,20 @@ export default function App() {
       const csv = exportCSV(rows);
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       saveAs(blob, "kobs-data.csv");
+      return;
+    }
+
+    if (viewMode === "lfer") {
+      const rows: (string | number)[][] = [];
+      rows.push([csvHeaderLFER1, csvHeaderLFER2, "R²"]);
+      const sorted = [...lferDots].sort((a, b) => a.log_km_kcat - b.log_km_kcat || a.id.localeCompare(b.id));
+      for (const d of sorted) {
+        const r2Value = d.r2 !== undefined ? d.r2.toFixed(6) : ""; // Keep full precision in CSV
+        rows.push([d.log_km_kcat.toFixed(4), d.log_ki.toFixed(4), r2Value]);
+      }
+      const csv = exportCSV(rows);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      saveAs(blob, "lfer-data.csv");
       return;
     }
 
@@ -1486,6 +1572,28 @@ export default function App() {
               />
             </div>
           )}
+          {viewMode === "lfer" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+              <input
+                value={csvHeaderLFER1}
+                onChange={(e) => setCsvHeaderLFER1(e.target.value)}
+                style={{ width: "33%" }}
+                placeholder="X column"
+              />
+              <input
+                value={csvHeaderLFER2}
+                onChange={(e) => setCsvHeaderLFER2(e.target.value)}
+                style={{ width: "33%" }}
+                placeholder="Y column"
+              />
+              <input
+                value="R²"
+                readOnly
+                style={{ width: "33%", backgroundColor: "#f5f5f5" }}
+                placeholder="R² column"
+              />
+            </div>
+          )}
 
           <div className="table-preview">
             {viewMode === "kobs" ? (
@@ -1501,6 +1609,25 @@ export default function App() {
                     <tr key={d.id}>
                       <td>{d.kobs.toFixed(4)}</td>
                       <td>{d.dose.toFixed(4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : viewMode === "lfer" ? (
+              <table style={{ width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th>{csvHeaderLFER1}</th>
+                    <th>{csvHeaderLFER2}</th>
+                    <th>R²</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...lferDots].sort((a, b) => a.log_km_kcat - b.log_km_kcat || a.id.localeCompare(b.id)).map((d) => (
+                    <tr key={d.id}>
+                      <td>{d.log_km_kcat.toFixed(4)}</td>
+                      <td>{d.log_ki.toFixed(4)}</td>
+                      <td>{d.r2 !== undefined ? (Math.round(d.r2 * 1000) / 1000).toFixed(3) : ""}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1591,7 +1718,8 @@ export default function App() {
       <div className="toolbar">
           <div style={{ marginBottom: 8 }}>
             <button onClick={() => setViewMode("slow")} style={{ fontWeight: viewMode === "slow" ? "600" : "400", marginRight: 8 }}>Slow Onset</button>
-            <button onClick={() => setViewMode("kobs")} style={{ fontWeight: viewMode === "kobs" ? "600" : "400" }}>K-Obs</button>
+            <button onClick={() => setViewMode("kobs")} style={{ fontWeight: viewMode === "kobs" ? "600" : "400", marginRight: 8 }}>K-Obs</button>
+            <button onClick={() => setViewMode("lfer")} style={{ fontWeight: viewMode === "lfer" ? "600" : "400" }}>LFER</button>
           </div>
           <div>
             <label>Load Image:</label>
@@ -1977,6 +2105,38 @@ export default function App() {
                   </React.Fragment>
                 );
               })}
+
+              {/* LFER dots (when active) */}
+              {lferDots.map((d) => {
+                const isActive = d.id === activeLFERDotId;
+                return (
+                  <React.Fragment key={d.id}>
+                    <Circle
+                      x={d.pixel.x}
+                      y={d.pixel.y}
+                      radius={probeDotSize}
+                      fill={isActive ? "green" : "#9c27b0"}
+                      opacity={probeDotOpacity}
+                      draggable
+                      onDragMove={(e: any) => { e.cancelBubble = true; onDragLFERDot(e, d.id); }}
+                      onDragEnd={() => onDragEndLFERDot(d.id)}
+                      onClick={(e: any) => { e.cancelBubble = true; setActiveLFERDotId(d.id === activeLFERDotId ? null : d.id); }}
+                    />
+                    {showProbeText && (
+                      <Text
+                        x={d.pixel.x + probeDotSize + 4}
+                        y={d.pixel.y - Math.max(8, Math.round(probeDotSize * 0.6))}
+                        text={`${csvHeaderLFER1}: ${d.log_km_kcat.toFixed(4)}  ${csvHeaderLFER2}: ${d.log_ki.toFixed(4)}`}
+                        fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                        fill="black"
+                      />
+                    )}
+                    {isActive && (
+                      <Circle x={d.pixel.x} y={d.pixel.y} radius={Math.max(1, probeDotSize - 1)} stroke="lime" strokeWidth={2} fill="transparent" />
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </Layer>
           </Stage>
         </div>
@@ -2141,6 +2301,109 @@ export default function App() {
                       </div>
                     ))}
                     {kobsDots.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>No dots</div>}
+                  </div>
+                </div>
+              </div>
+            </CollapsibleSection>
+          ) : null}
+
+          {/* LFER UI (visible in right panel when viewMode === 'lfer') */}
+          {viewMode === "lfer" ? (
+            <CollapsibleSection title="LFER" defaultOpen={true}>
+              <div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                  <input
+                    value={csvHeaderLFER1}
+                    onChange={(e) => setCsvHeaderLFER1(e.target.value)}
+                    style={{ width: "50%" }}
+                    placeholder="X-axis header"
+                  />
+                  <input
+                    value={csvHeaderLFER2}
+                    onChange={(e) => setCsvHeaderLFER2(e.target.value)}
+                    style={{ width: "50%" }}
+                    placeholder="Y-axis header"
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <button onClick={() => { setLferDots([]); setActiveLFERDotId(null); }}>Clear dots</button>
+                  <button onClick={() => {
+                    if (!calibrated()) { alert("Please calibrate axes first."); return; }
+                    // add a center dot
+                    try {
+                      const centerPixel = dataToPixel(
+                        { x: (x1.value! + x2.value!) / 2, y: (y1.value! + y2.value!) / 2 },
+                        { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! },
+                        { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }
+                      );
+                      const data = pixelToData(centerPixel, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value });
+                      const id = uid("lfer_");
+                      const dot = { id, pixel: centerPixel, log_km_kcat: data.x, log_ki: data.y };
+                      setLferDots((ds) => {
+                        const next = [...ds, dot];
+                        next.sort((a, b) => a.log_km_kcat - b.log_km_kcat || a.id.localeCompare(b.id));
+                        return next;
+                      });
+                    } catch (err) {
+                      // eslint-disable-next-line no-console
+                      console.error(err);
+                      alert("Could not add center dot.");
+                    }
+                  }}>Add center dot</button>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <button onClick={() => {
+                    if (lferDots.length < 2) {
+                      alert("Need at least 2 points to compute R².");
+                      return;
+                    }
+                    
+                    const xs = lferDots.map(d => d.log_km_kcat);
+                    const ys = lferDots.map(d => d.log_ki);
+                    
+                    const result = computeLinearFit(xs, ys);
+                    
+                    if (result.reason === "n<2") {
+                      alert("Need at least 2 points to compute R².");
+                      return;
+                    }
+                    
+                    if (result.reason === "vertical") {
+                      alert("R² undefined (vertical line - zero variance in x).");
+                      return;
+                    }
+                    
+                    if (isNaN(result.r2)) {
+                      alert("R² undefined (zero variance in y).");
+                      return;
+                    }
+                    
+                    // Update all dots with the computed R² value
+                    const r2Value = Math.round(result.r2 * 1000) / 1000; // Round to 3 decimals for display
+                    setLferDots(dots => dots.map(d => ({ ...d, r2: result.r2 }))); // Keep full precision in state
+                    
+                    alert(`R² computed: ${r2Value.toFixed(3)}\nSlope: ${result.m.toFixed(4)}\nIntercept: ${result.b.toFixed(4)}`);
+                  }}>Compute R²</button>
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <small>Click on the image to add dots. Select a dot and press Delete to remove it. Drag to move.</small>
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <strong>Dots</strong>
+                  <div style={{ marginTop: 6, maxHeight: 160, overflow: "auto" }}>
+                    {lferDots.map((d) => (
+                      <div key={d.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", padding: "4px 0" }}>
+                        <div style={{ fontSize: 12 }}>
+                          {d.log_km_kcat.toFixed(4)} , {d.log_ki.toFixed(4)}
+                          {d.r2 !== undefined && <span style={{ color: "var(--muted)", marginLeft: 8 }}>R²: {(Math.round(d.r2 * 1000) / 1000).toFixed(3)}</span>}
+                        </div>
+                        <div>
+                          <button onClick={(e) => { e.stopPropagation(); setActiveLFERDotId(d.id); }}>Select</button>
+                          <button style={{ marginLeft: 6 }} onClick={(e) => { e.stopPropagation(); setLferDots(ds => ds.filter(x => x.id !== d.id)); if (activeLFERDotId === d.id) setActiveLFERDotId(null); }}>Remove</button>
+                        </div>
+                      </div>
+                    ))}
+                    {lferDots.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>No dots</div>}
                   </div>
                 </div>
               </div>
