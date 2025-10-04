@@ -93,11 +93,17 @@ export default function App() {
   // CSV header editable names for LFER table
   const [csvHeaderLFER1, setCsvHeaderLFER1] = useState<string>("log_km/kcat");
   const [csvHeaderLFER2, setCsvHeaderLFER2] = useState<string>("log_ki");
+  // CSV header editable names for PH table
+  const [csvHeaderPH, setCsvHeaderPH] = useState<string>("PH");
+  const [csvHeaderKcatKm, setCsvHeaderKcatKm] = useState<string>("kcat/km");
+  const [csvHeaderPH2, setCsvHeaderPH2] = useState<string>("PH");
+  const [csvHeaderKiInverse, setCsvHeaderKiInverse] = useState<string>("1/ki");
 
   // View mode: "slow" = existing behavior, "kobs" = K-Obs mode, "lfer" = LFER mode
   type KDot = { id: string; pixel: Point; kobs: number; dose: number };
-  type LFERDot = { id: string; pixel: Point; log_km_kcat: number; log_ki: number; r2?: number };
-  const [viewMode, setViewMode] = useState<"slow" | "kobs" | "lfer">("slow");
+type LFERDot = { id: string; pixel: Point; log_km_kcat: number; log_ki: number; r2?: number };
+  type PHDot = { id: string; pixel: Point; ph: number; kcat_km: number; ki_inverse: number; activeCurve: 1 | 2 };
+  const [viewMode, setViewMode] = useState<"slow" | "kobs" | "lfer" | "ph">("slow");
 
   // K-Obs dots (when viewMode === "kobs")
   const [kobsDots, setKobsDots] = useState<KDot[]>([]);
@@ -106,6 +112,11 @@ export default function App() {
   // LFER dots (when viewMode === "lfer")
   const [lferDots, setLferDots] = useState<LFERDot[]>([]);
   const [activeLFERDotId, setActiveLFERDotId] = useState<string | null>(null);
+
+  // PH dots (when viewMode === "ph")
+  const [phDots, setPhDots] = useState<PHDot[]>([]);
+  const [activePHDotId, setActivePHDotId] = useState<string | null>(null);
+  const [phActiveCurve, setPhActiveCurve] = useState<1 | 2>(1);
 
   // label -> hex color and label -> palette name
   const [labelColors, setLabelColors] = useState<Record<string, string>>(() => {
@@ -435,10 +446,16 @@ export default function App() {
     setSelProbeBand(p?.bandPx ?? null);
   }, [activeProbeId, probes]);
 
-  // keyboard handler: press Delete (or Backspace) to remove selected probe, kobs dot, lfer dot, or remove a single label value when active
+  // keyboard handler: press Delete (or Backspace) to remove selected probe, kobs dot, lfer dot, ph dot, or remove a single label value when active
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Delete" || e.key === "Backspace") {
+        // Prioritize PH dot deletion if active
+        if (activePHDotId) {
+          setPhDots((ds) => ds.filter((d) => d.id !== activePHDotId));
+          setActivePHDotId(null);
+          return;
+        }
         // Prioritize LFER dot deletion if active
         if (activeLFERDotId) {
           setLferDots((ds) => ds.filter((d) => d.id !== activeLFERDotId));
@@ -479,7 +496,7 @@ export default function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeProbeId, activeLabel, labels, activeKDotId, activeLFERDotId]);
+  }, [activeProbeId, activeLabel, labels, activeKDotId, activeLFERDotId, activePHDotId]);
 
   // Hidden canvas for pixel sampling
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -610,6 +627,44 @@ export default function App() {
         // eslint-disable-next-line no-console
         console.error("LFER add error:", err);
         alert("Could not create LFER dot.");
+      }
+      return;
+    }
+
+    // PH click-to-create flow (when in PH view)
+    if (viewMode === "ph") {
+      // ignore clicks while drawing/highlighting or when placing calibration
+      if (highlightEnabled) return;
+      if (placing) return;
+      if (!calibrated()) {
+        alert("Please calibrate axes first.");
+        return;
+      }
+      try {
+        const data = pixelToData(
+          pixel,
+          { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel },
+          { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value }
+        );
+        const id = uid("phdot_");
+        const dot: PHDot = { 
+          id, 
+          pixel, 
+          ph: data.x, 
+          kcat_km: phActiveCurve === 1 ? data.y : 0, 
+          ki_inverse: phActiveCurve === 2 ? data.y : 0, 
+          activeCurve: phActiveCurve 
+        };
+        setPhDots((ds) => {
+          const next = [...ds, dot];
+          next.sort((a, b) => a.ph - b.ph || a.id.localeCompare(b.id));
+          return next;
+        });
+        setActivePHDotId(id);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("PH add error:", err);
+        alert("Could not create PH dot.");
       }
       return;
     }
@@ -1175,6 +1230,37 @@ export default function App() {
     setActiveLFERDotId(id);
   }
 
+  // Dragging PH dots (free x/y)
+  function onDragPHDot(e: any, id: string) {
+    const node = e.target;
+    const px = node.x();
+    const py = node.y();
+    setPhDots((ds) =>
+      ds.map((d) => {
+        if (d.id !== id) return d;
+        let ph = d.ph;
+        let kcat_km = d.kcat_km;
+        let ki_inverse = d.ki_inverse;
+        try {
+          if (calibrated()) {
+            const data = pixelToData({ x: px, y: py }, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value });
+            ph = data.x;
+            if (d.activeCurve === 1) {
+              kcat_km = data.y;
+            } else {
+              ki_inverse = data.y;
+            }
+          }
+        } catch (err) {}
+        return { ...d, pixel: { x: px, y: py }, ph, kcat_km, ki_inverse };
+      })
+    );
+  }
+  function onDragEndPHDot(id: string) {
+    // Keep selection on drag end
+    setActivePHDotId(id);
+  }
+
   // Export CSV
   function downloadCSV() {
     if (viewMode === "kobs") {
@@ -1201,6 +1287,32 @@ export default function App() {
       const csv = exportCSV(rows);
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       saveAs(blob, "lfer-data.csv");
+      return;
+    }
+
+    if (viewMode === "ph") {
+      const rows: (string | number)[][] = [];
+      rows.push([csvHeaderPH, csvHeaderKcatKm, csvHeaderPH2, csvHeaderKiInverse]);
+      
+      // Create long format: separate rows for each curve
+      const curve1Dots = [...phDots].filter(d => d.activeCurve === 1).sort((a, b) => a.ph - b.ph || a.id.localeCompare(b.id));
+      const curve2Dots = [...phDots].filter(d => d.activeCurve === 2).sort((a, b) => a.ph - b.ph || a.id.localeCompare(b.id));
+      const maxRows = Math.max(curve1Dots.length, curve2Dots.length);
+      
+      for (let i = 0; i < maxRows; i++) {
+        const c1 = curve1Dots[i];
+        const c2 = curve2Dots[i];
+        rows.push([
+          c1 ? c1.ph.toFixed(4) : "",
+          c1 ? c1.kcat_km.toFixed(4) : "",
+          c2 ? c2.ph.toFixed(4) : "",
+          c2 ? c2.ki_inverse.toFixed(4) : ""
+        ]);
+      }
+      
+      const csv = exportCSV(rows);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      saveAs(blob, "ph-data.csv");
       return;
     }
 
@@ -1594,6 +1706,34 @@ export default function App() {
               />
             </div>
           )}
+          {viewMode === "ph" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+              <input
+                value={csvHeaderPH}
+                onChange={(e) => setCsvHeaderPH(e.target.value)}
+                style={{ width: "25%" }}
+                placeholder="PH (Curve 1)"
+              />
+              <input
+                value={csvHeaderKcatKm}
+                onChange={(e) => setCsvHeaderKcatKm(e.target.value)}
+                style={{ width: "25%" }}
+                placeholder="kcat/km"
+              />
+              <input
+                value={csvHeaderPH2}
+                onChange={(e) => setCsvHeaderPH2(e.target.value)}
+                style={{ width: "25%" }}
+                placeholder="PH (Curve 2)"
+              />
+              <input
+                value={csvHeaderKiInverse}
+                onChange={(e) => setCsvHeaderKiInverse(e.target.value)}
+                style={{ width: "25%" }}
+                placeholder="1/ki"
+              />
+            </div>
+          )}
 
           <div className="table-preview">
             {viewMode === "kobs" ? (
@@ -1630,6 +1770,39 @@ export default function App() {
                       <td>{d.r2 !== undefined ? (Math.round(d.r2 * 1000) / 1000).toFixed(3) : ""}</td>
                     </tr>
                   ))}
+                </tbody>
+              </table>
+            ) : viewMode === "ph" ? (
+              <table style={{ width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th>{csvHeaderPH}</th>
+                    <th>{csvHeaderKcatKm}</th>
+                    <th>{csvHeaderPH2}</th>
+                    <th>{csvHeaderKiInverse}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(() => {
+                    // Create long format: separate rows for each curve
+                    const curve1Dots = [...phDots].filter(d => d.activeCurve === 1).sort((a, b) => a.ph - b.ph || a.id.localeCompare(b.id));
+                    const curve2Dots = [...phDots].filter(d => d.activeCurve === 2).sort((a, b) => a.ph - b.ph || a.id.localeCompare(b.id));
+                    const maxRows = Math.max(curve1Dots.length, curve2Dots.length);
+                    const rows = [];
+                    for (let i = 0; i < maxRows; i++) {
+                      const c1 = curve1Dots[i];
+                      const c2 = curve2Dots[i];
+                      rows.push(
+                        <tr key={`row_${i}`}>
+                          <td>{c1 ? c1.ph.toFixed(4) : ""}</td>
+                          <td>{c1 ? c1.kcat_km.toFixed(4) : ""}</td>
+                          <td>{c2 ? c2.ph.toFixed(4) : ""}</td>
+                          <td>{c2 ? c2.ki_inverse.toFixed(4) : ""}</td>
+                        </tr>
+                      );
+                    }
+                    return rows;
+                  })()}
                 </tbody>
               </table>
             ) : (
@@ -1719,7 +1892,8 @@ export default function App() {
           <div style={{ marginBottom: 8 }}>
             <button onClick={() => setViewMode("slow")} style={{ fontWeight: viewMode === "slow" ? "600" : "400", marginRight: 8 }}>Slow Onset</button>
             <button onClick={() => setViewMode("kobs")} style={{ fontWeight: viewMode === "kobs" ? "600" : "400", marginRight: 8 }}>K-Obs</button>
-            <button onClick={() => setViewMode("lfer")} style={{ fontWeight: viewMode === "lfer" ? "600" : "400" }}>LFER</button>
+            <button onClick={() => setViewMode("lfer")} style={{ fontWeight: viewMode === "lfer" ? "600" : "400", marginRight: 8 }}>LFER</button>
+            <button onClick={() => setViewMode("ph")} style={{ fontWeight: viewMode === "ph" ? "600" : "400" }}>PH</button>
           </div>
           <div>
             <label>Load Image:</label>
@@ -2137,6 +2311,40 @@ export default function App() {
                   </React.Fragment>
                 );
               })}
+
+              {/* PH dots (when active) */}
+              {phDots.map((d) => {
+                const isActive = d.id === activePHDotId;
+                // Use different colors for each curve: orange for curve 1, blue for curve 2
+                const curveColor = d.activeCurve === 1 ? "#ff9800" : "#2196f3";
+                return (
+                  <React.Fragment key={d.id}>
+                    <Circle
+                      x={d.pixel.x}
+                      y={d.pixel.y}
+                      radius={probeDotSize}
+                      fill={isActive ? "green" : curveColor}
+                      opacity={probeDotOpacity}
+                      draggable
+                      onDragMove={(e: any) => { e.cancelBubble = true; onDragPHDot(e, d.id); }}
+                      onDragEnd={() => onDragEndPHDot(d.id)}
+                      onClick={(e: any) => { e.cancelBubble = true; setActivePHDotId(d.id === activePHDotId ? null : d.id); }}
+                    />
+                    {showProbeText && (
+                      <Text
+                        x={d.pixel.x + probeDotSize + 4}
+                        y={d.pixel.y - Math.max(8, Math.round(probeDotSize * 0.6))}
+                        text={`PH: ${d.ph.toFixed(4)} | ${d.activeCurve === 1 ? `kcat/km: ${d.kcat_km.toFixed(4)}` : `1/ki: ${d.ki_inverse.toFixed(4)}`} (Curve ${d.activeCurve})`}
+                        fontSize={Math.max(10, Math.round(probeDotSize * 0.9))}
+                        fill="black"
+                      />
+                    )}
+                    {isActive && (
+                      <Circle x={d.pixel.x} y={d.pixel.y} radius={Math.max(1, probeDotSize - 1)} stroke="lime" strokeWidth={2} fill="transparent" />
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </Layer>
           </Stage>
         </div>
@@ -2404,6 +2612,98 @@ export default function App() {
                       </div>
                     ))}
                     {lferDots.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>No dots</div>}
+                  </div>
+                </div>
+              </div>
+            </CollapsibleSection>
+          ) : null}
+
+          {/* PH UI (visible in right panel when viewMode === 'ph') */}
+          {viewMode === "ph" ? (
+            <CollapsibleSection title="PH" defaultOpen={true}>
+              <div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                  <input
+                    value={csvHeaderPH}
+                    onChange={(e) => setCsvHeaderPH(e.target.value)}
+                    style={{ width: "33%" }}
+                    placeholder="PH column"
+                  />
+                  <input
+                    value={csvHeaderKcatKm}
+                    onChange={(e) => setCsvHeaderKcatKm(e.target.value)}
+                    style={{ width: "33%" }}
+                    placeholder="kcat/km column"
+                  />
+                  <input
+                    value={csvHeaderKiInverse}
+                    onChange={(e) => setCsvHeaderKiInverse(e.target.value)}
+                    style={{ width: "33%" }}
+                    placeholder="1/ki column"
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <label>Active Curve:</label>
+                  <select value={phActiveCurve} onChange={(e) => setPhActiveCurve(Number(e.target.value) as 1 | 2)}>
+                    <option value={1}>Curve 1 (kcat/km)</option>
+                    <option value={2}>Curve 2 (1/ki)</option>
+                  </select>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <button onClick={() => { setPhDots([]); setActivePHDotId(null); }}>Clear dots</button>
+                  <button onClick={() => {
+                    if (!calibrated()) { alert("Please calibrate axes first."); return; }
+                    // add a center dot
+                    try {
+                      const centerPixel = dataToPixel(
+                        { x: (x1.value! + x2.value!) / 2, y: (y1.value! + y2.value!) / 2 },
+                        { x1: x1.pixel!, x2: x2.pixel!, y1: y1.pixel!, y2: y2.pixel! },
+                        { x1: x1.value!, x2: x2.value!, y1: y1.value!, y2: y2.value! }
+                      );
+                      const data = pixelToData(centerPixel, { x1: x1.pixel, x2: x2.pixel, y1: y1.pixel, y2: y2.pixel }, { x1: x1.value, x2: x2.value, y1: y1.value, y2: y2.value });
+                      const id = uid("phdot_");
+                      const dot: PHDot = { 
+                        id, 
+                        pixel: centerPixel, 
+                        ph: data.x, 
+                        kcat_km: phActiveCurve === 1 ? data.y : 0, 
+                        ki_inverse: phActiveCurve === 2 ? data.y : 0, 
+                        activeCurve: phActiveCurve 
+                      };
+                      setPhDots((ds) => {
+                        const next = [...ds, dot];
+                        next.sort((a, b) => a.ph - b.ph || a.id.localeCompare(b.id));
+                        return next;
+                      });
+                    } catch (err) {
+                      // eslint-disable-next-line no-console
+                      console.error(err);
+                      alert("Could not add center dot.");
+                    }
+                  }}>Add center dot</button>
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <small>Select a curve above, then click on the image to add dots for that curve. Select a dot and press Delete to remove it. Drag to move.</small>
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <strong>Dots</strong>
+                  <div style={{ marginTop: 6, maxHeight: 160, overflow: "auto" }}>
+                    {phDots.map((d) => (
+                      <div key={d.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", padding: "4px 0" }}>
+                        <div style={{ fontSize: 12 }}>
+                          PH: {d.ph.toFixed(4)} | 
+                          {d.activeCurve === 1 ? ` kcat/km: ${d.kcat_km.toFixed(4)}` : ` 1/ki: ${d.ki_inverse.toFixed(4)}`}
+                          <span style={{ color: d.activeCurve === 1 ? "#ff9800" : "#2196f3", marginLeft: 8 }}>
+                            Curve {d.activeCurve}
+                          </span>
+                        </div>
+                        <div>
+                          <button onClick={(e) => { e.stopPropagation(); setActivePHDotId(d.id); }}>Select</button>
+                          <button style={{ marginLeft: 6 }} onClick={(e) => { e.stopPropagation(); setPhDots(ds => ds.filter(x => x.id !== d.id)); if (activePHDotId === d.id) setActivePHDotId(null); }}>Remove</button>
+                        </div>
+                      </div>
+                    ))}
+                    {phDots.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>No dots</div>}
                   </div>
                 </div>
               </div>
