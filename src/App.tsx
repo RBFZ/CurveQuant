@@ -1111,10 +1111,10 @@ type LFERDot = { id: string; pixel: Point; log_km_kcat: number; log_ki: number; 
     setImageSrc(null);
     setProbes([]);
     setDetectionResults({});
-    setX1({ pixel: null, value: 0 });
-    setX2({ pixel: null, value: 30 });
+    setX1({ pixel: null, value: 3 });
+    setX2({ pixel: null, value: 9 });
     setY1({ pixel: null, value: 0 });
-    setY2({ pixel: null, value: 50 });
+    setY2({ pixel: null, value: 220 });
     setLabels(["5", "10", "20"]);
     setLabelsText("5,10,20");
     // reset color mapping
