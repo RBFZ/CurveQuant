@@ -72,10 +72,10 @@ export default function App() {
   const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
 
   // Calibration points (x1,x2) horizontal; (y1,y2) vertical with snapping rules
-  const [x1, setX1] = useState<CalPoint>({ pixel: null, value: 0 });
-  const [x2, setX2] = useState<CalPoint>({ pixel: null, value: 30 });
+  const [x1, setX1] = useState<CalPoint>({ pixel: null, value: 3 });
+  const [x2, setX2] = useState<CalPoint>({ pixel: null, value: 9 });
   const [y1, setY1] = useState<CalPoint>({ pixel: null, value: 0 });
-  const [y2, setY2] = useState<CalPoint>({ pixel: null, value: 50 });
+  const [y2, setY2] = useState<CalPoint>({ pixel: null, value: 220 });
 
   // Probes and curve labels
   const [probes, setProbes] = useState<Probe[]>([]);
